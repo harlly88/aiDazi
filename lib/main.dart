@@ -5,8 +5,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
-import 'package:flutter/foundation.dart' show Uint8List, debugPrint;
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter/foundation.dart'
+    show Uint8List, debugPrint, kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart'; // ignore: depend_on_referenced_packages
 import 'package:url_launcher/url_launcher_string.dart' show launchUrlString;
 import 'package:http/http.dart' as http;
@@ -28,10 +28,12 @@ import 'userprofile.dart';
 import 'formatconfig.dart';
 import 'display_settings_defaults.dart';
 import 'vits.dart';
-import 'voice_input.dart';
 import 'image_provider.dart';
 import 'video_provider.dart';
 import 'i18n.dart';
+import 'secure_key_store.dart' show migratePlainKeysOnce;
+import 'lan_config_page.dart';
+import 'device_mode.dart';
 
 final ValueNotifier<ThemeMode> themeModeNotifier =
     ValueNotifier(ThemeMode.system);
@@ -40,6 +42,8 @@ final ValueNotifier<int> appReloadVersion = ValueNotifier(0);
 
 main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 19.4：旧明文密钥一次性静默迁移（io 平台；失败不阻塞启动，下次启动重试）
+  unawaited(migratePlainKeysOnce());
   await _loadAppPreferences();
   runApp(const AiDaziApp());
 }
@@ -135,7 +139,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   bool isForeground = true;
   bool isAutoNotification = false;
   bool _isToolsExpanded = false;
-  String? _characterStatus;
   List<Message> messages = [];
   List<List<String>> historys = [];
   List<String>? currentStory;
@@ -149,7 +152,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   int _replyOperation = 0;
   int _inspireOperation = 0;
   int _drawOperation = 0;
-  int _statusOperation = 0;
   int _welcomeOperation = 0;
   int _voiceOperation = 0;
   int _historyRefreshOperation = 0;
@@ -157,7 +159,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   int _characterSwitchOperation = 0;
   bool _isInspiring = false;
   bool _isDrawing = false;
-  bool _isGettingStatus = false;
   bool _isWelcoming = false;
 
   // 自动背景轮换（14.14）：每 2-5 轮对话切换角色 bgImages 中的背景
@@ -165,11 +166,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   int _autoBgThreshold = 3;
   int _bgImageIndex = 0;
   bool _noBgHintShown = false; // 15.1 一次性提示「当前角色暂无背景图」
-
-  // 语音输入（长按录音 → ASR → 直接发送）
-  final VoiceInputController _voiceInput = VoiceInputController();
-  bool _isRecording = false;
-  bool _isTranscribing = false;
 
   List<Message> _copyMessages(Iterable<Message> source) => source
       .map((message) => Message(message: message.message, type: message.type))
@@ -180,20 +176,13 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
     _replyOperation++;
     _inspireOperation++;
     _drawOperation++;
-    _statusOperation++;
     _welcomeOperation++;
     _voiceOperation++;
     unawaited(stopAudio());
-    if (_isRecording) {
-      _isRecording = false;
-      unawaited(_voiceInput.cancel());
-    }
     inputLock = false;
     _isInspiring = false;
     _isDrawing = false;
-    _isGettingStatus = false;
     _isWelcoming = false;
-    _characterStatus = I18n.t('no_status');
   }
 
   bool _isCurrentConversation(int version) =>
@@ -284,7 +273,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _characterStatus = I18n.t('no_status');
     // 18.6：抢救已中毒安装——旧版本导入角色时把整张卡 base64 存进 avatar，
     // 导致 SharedPreferences 启动时 OOM 白屏。启动时检测超大 data URI 并落盘替换为路径。
     unawaited(_sanitizeLargeAvatarDataUri());
@@ -367,6 +355,18 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
     });
   }
 
+  // 第二十四章：网页保存三要素后刷新当前 LLM 配置。config 仅在 initState 赋值
+  // 一次，网页保存（setApiConfig/setLlmApiKey/setCurrentApiConfig）绕过 configpage
+  // 的 updateFunc 回调——不刷新会导致对话仍用旧 Config（新用户场景 name 为空 →
+  // getLlmApiKey 读空槽 → 误报「文字密钥未配置」）。getApiConfigs 首项即 current。
+  Future<void> _reloadCurrentConfig() async {
+    final configs = await getApiConfigs();
+    if (!mounted) return;
+    if (configs.isNotEmpty) {
+      setState(() => config = configs[0]);
+    }
+  }
+
   void _showWelcomeScreen() {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -420,17 +420,19 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
                       ),
                       const SizedBox(height: 60),
                       ElevatedButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => ConfigPage(
-                                  updateFunc: updateConfig,
-                                  currentConfig: config),
-                            ),
-                          );
-                        },
+                        onPressed: () async {
+                        Navigator.pop(context);
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => ConfigPage(
+                                updateFunc: updateConfig,
+                                currentConfig: config),
+                          ),
+                        );
+                        // 第二十四章：首次配置完成（含网页保存）后刷新当前 Config
+                        await _reloadCurrentConfig();
+                      },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: primaryBlue,
@@ -461,7 +463,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(_voiceInput.dispose());
     super.dispose();
   }
 
@@ -830,6 +831,11 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
           operation != _replyOperation) {
         return;
       }
+      // 15.9：模型偶发输出字面转义序列（\n、\t、\"），先归一为真实字符，
+      // 再统一把换行/反斜杠压成分段符，避免残留进气泡文本
+      response = response.replaceAll(r'\n', '\n');
+      response = response.replaceAll(r'\t', ' ');
+      response = response.replaceAll(r'\"', '"');
       response = response.replaceAll(RegExp(r'[\n\\]+'), r'\');
       response = randomizeBackslashes(response);
       response = response.replaceAll(RegExp(await getResponseRegex()), '');
@@ -844,8 +850,9 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
       unlockInput();
 
       // 自动发声：开关开启时，AI 回复完成即合成并播放（仅自动，无手动入口）
+      // 15.9：分段符（\）不是朗读内容，归一为「，」再合成，避免读出反斜杠
       if (_isAutoVoice) {
-        unawaited(getVoice(response));
+        unawaited(getVoice(response.replaceAll(RegExp(r'\\+'), '，')));
       }
       // 自动背景（14.14）：每 2-5 轮对话自动切换角色背景
       unawaited(_maybeRotateBackground());
@@ -893,6 +900,8 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
 
   /// 下载图片到本地应用目录（避免百炼临时 URL 过期后背景丢失）
   Future<String> _downloadImageToLocal(String url) async {
+    // 第十六章：OpenAI 协议 b64 兜底产物已是本地路径，直通不再发起 http
+    if (!url.startsWith('http')) return url;
     final dir = await getApplicationDocumentsDirectory();
     final bgDir = Directory('${dir.path}/backgrounds');
     if (!await bgDir.exists()) {
@@ -998,38 +1007,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
       if (identical(_voiceRequests[text], request)) {
         _voiceRequests.remove(text);
       }
-    }
-  }
-
-  /// 长按麦克风开始录音
-  Future<void> _startVoiceInput() async {
-    if (inputLock || _isRecording || _isTranscribing) return;
-    HapticFeedback.heavyImpact();
-    try {
-      await _voiceInput.start();
-      if (!mounted) return;
-      setState(() => _isRecording = true);
-    } catch (e) {
-      if (mounted) snackBarAlert(context, "$e");
-    }
-  }
-
-  /// 松开麦克风：停止录音 → 识别 → 直接发送（无需确认）
-  Future<void> _finishVoiceInput() async {
-    if (!_isRecording) return;
-    setState(() {
-      _isRecording = false;
-      _isTranscribing = true;
-    });
-    try {
-      final text = await _voiceInput.stopAndTranscribe();
-      if (!mounted || text == null || text.isEmpty) return;
-      textController.text = text;
-      sendMsg(true);
-    } catch (e) {
-      if (mounted) snackBarAlert(context, "${I18n.t('asr_failed')}: $e");
-    } finally {
-      if (mounted) setState(() => _isTranscribing = false);
     }
   }
 
@@ -1350,9 +1327,12 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
     required int conversationVersion,
     required int operation,
   }) async {
+    // 15.8：长按消息生图只总结所选消息前后各 3 条（前3+所选+后3）；null 兜底取全部
     final List<Message> drawMessages = beforeIndex == null
         ? _copyMessages(messages)
-        : _copyMessages(messages.take(beforeIndex));
+        : _copyMessages(messages.sublist(
+            (beforeIndex - 3).clamp(0, messages.length),
+            (beforeIndex + 4).clamp(0, messages.length)));
     List<List<String>> msg = await parseMsg(
         drawMessages,
         currentStory != null ? jsonToMsg(currentStory![2]) : [],
@@ -1374,12 +1354,14 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
       return;
     }
 
-    // 2. 万相文生图：角色外貌描述 + 场景提示词；有参考图自动图生图（Base64 直传），无则纯文生图
+    // 2. 生图逻辑：有参考图 → 图生图（仅用场景提示词，不用角色绘图提示词）；
+    //    无参考图 → 文生图（角色外貌描述 + 场景提示词）
     final charPrompt = await getDrawCharPrompt();
     final refImageBytes = await _readRefImageBytes();
+    final drawPrompt = refImageBytes != null ? promptText : '$charPrompt, $promptText';
     snackBarAlert(context, I18n.t('generating'));
     final url = await generateWanxImage(
-      prompt: '$charPrompt, $promptText',
+      prompt: drawPrompt,
       refImageBytes: refImageBytes,
     );
 
@@ -1407,7 +1389,8 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
         operation != _drawOperation) {
       return;
     }
-    if (imagePath != url) {
+    if (imagePath != url || !imagePath.startsWith('http')) {
+      // 已下载到本地 / 第十六章 b64 兜底本就是本地路径 → 文件背景
       _applyBackground(FileImage(File(imagePath)), localPath: imagePath);
       // 16.2：图片已自动设为背景，提示用户
       snackBarAlert(context, I18n.t('story_bg_generated'));
@@ -1463,9 +1446,12 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
     final conversationVersion = _conversationVersion;
     setState(() => _isDrawing = true);
     try {
+      // 15.8：长按消息生视频只总结所选消息前后各 3 条（前3+所选+后3）；null 兜底取全部
       final List<Message> videoMessages = beforeIndex == null
           ? _copyMessages(messages)
-          : _copyMessages(messages.take(beforeIndex));
+          : _copyMessages(messages.sublist(
+              (beforeIndex - 3).clamp(0, messages.length),
+              (beforeIndex + 4).clamp(0, messages.length)));
       List<List<String>> msg = await parseMsg(
           videoMessages,
           currentStory != null ? jsonToMsg(currentStory![2]) : [],
@@ -1487,11 +1473,13 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
       }
 
       // 万相视频（异步任务，轮询等待，耗时较长）；
-      // 15.12：有参考图走图生视频（Base64 直传首帧图），无则纯文生视频
+      // 15.8：提示词统一为「角色外貌 + 场景」（与生图文生图分支一致）；
+      // 有参考图 → 图生视频（参考图约束主角形象，Base64 直传），无 → 纯文生视频
       snackBarAlert(context, I18n.t('video_generating'));
+      final charPrompt = await getDrawCharPrompt();
       final refImageBytes = await _readRefImageBytes();
       final url = await generateWanxVideo(
-        prompt: promptText,
+        prompt: '$charPrompt, $promptText',
         refImageBytes: refImageBytes,
       );
 
@@ -1567,12 +1555,14 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
       );
       if (promptText.isEmpty || operation != _drawOperation) return;
 
-      // 2. 万相文生图（9:16）：角色外貌描述 + 故事场景；有参考图自动图生图
+      // 2. 生图逻辑：有参考图 → 图生图（仅用故事场景提示词，不用角色绘图提示词）；
+      //    无参考图 → 文生图（角色外貌描述 + 故事场景）
       final charPrompt = await getDrawCharPrompt();
       final refImageBytes = await _readRefImageBytes();
+      final drawPrompt = refImageBytes != null ? promptText : '$charPrompt, $promptText';
       snackBarAlert(context, I18n.t('generating'));
       final url = await generateWanxImage(
-        prompt: '$charPrompt, $promptText',
+        prompt: drawPrompt,
         refImageBytes: refImageBytes,
       );
       if (!mounted || operation != _drawOperation) return;
@@ -1586,7 +1576,8 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
         debugPrint('story background download failed: $e'); // 下载失败回落临时 URL
       }
       if (!mounted || operation != _drawOperation) return;
-      if (imagePath != url) {
+      if (imagePath != url || !imagePath.startsWith('http')) {
+        // 已下载到本地 / 第十六章 b64 兜底本就是本地路径 → 文件背景
         _applyBackground(FileImage(File(imagePath)), localPath: imagePath);
       } else {
         _applyBackground(NetworkImage(url));
@@ -1866,150 +1857,6 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
     );
   }
 
-  void _showStatusDialog() {
-    // 编辑器
-    final controller = TextEditingController(text: _characterStatus);
-    // 显示状态信息对话框
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('$studentName${I18n.t('status_suffix')}'),
-          content: SingleChildScrollView(
-            child: MarkdownBody(
-              data: _characterStatus!,
-            ),
-          ),
-          actions: [
-            // 编辑按钮
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                showDialog(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: Text(I18n.t('edit_status')),
-                    content: TextField(
-                      maxLines: null,
-                      minLines: 1,
-                      controller: controller,
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () {
-                          controller.clear();
-                        },
-                        child: Text(I18n.t('clear')),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          if (controller.text.isNotEmpty) {
-                            setState(() {
-                              _characterStatus = controller.text;
-                            });
-                          }
-                          Navigator.of(context).pop();
-                          _showStatusDialog();
-                        },
-                        child: Text(I18n.t('confirm')),
-                      ),
-                    ],
-                  ),
-                );
-              },
-              child: Text(I18n.t('edit')),
-            ),
-            // 重新查询
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                getStatus(forceGet: true);
-              },
-              child: Text(I18n.t('refresh')),
-            ),
-            // 添加到对话
-            TextButton(
-              onPressed: () {
-                final status = _characterStatus!;
-                Navigator.of(context).pop();
-                setState(() {
-                  _invalidateConversation();
-                  messages.add(Message(message: status, type: Message.system));
-                  _conversationVersion++;
-                  _singleViewIndex = messages.length - 1;
-                });
-                unawaited(_saveTempHistory());
-              },
-              child: Text(I18n.t('add_to_chat')),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Future<void> getStatus({bool forceGet = false, bool silent = false}) async {
-    final needsFetch = forceGet ||
-        _characterStatus == null ||
-        _characterStatus == I18n.t("no_status");
-    if (!needsFetch) {
-      if (!silent) {
-        _showStatusDialog();
-      }
-      return;
-    }
-    if (_isGettingStatus) return;
-
-    final operation = ++_statusOperation;
-    final conversationVersion = _conversationVersion;
-    setState(() => _isGettingStatus = true);
-    Route<dynamic>? progressRoute;
-    try {
-      final msg = await parseMsg(
-        _copyMessages(messages),
-        currentStory != null ? jsonToMsg(currentStory![2]) : [],
-        [Message(message: await getStatusPrompt(), type: Message.system)],
-      );
-      if (!_isCurrentConversation(conversationVersion) ||
-          operation != _statusOperation) {
-        return;
-      }
-      logMsg(msg);
-
-      if (!silent) {
-        progressRoute = await _showProgressDialog(I18n.t('analyzing_status'));
-      }
-      final result = await collectCompletion(config, msg);
-      _closeDialogRoute(progressRoute);
-      progressRoute = null;
-      if (!_isCurrentConversation(conversationVersion) ||
-          operation != _statusOperation) {
-        return;
-      }
-
-      final cleanResult =
-          result.replaceAll(RegExp(await getResponseRegex()), '').trim();
-      if (cleanResult.isNotEmpty &&
-          _isCurrentConversation(conversationVersion) &&
-          operation == _statusOperation) {
-        setState(() => _characterStatus = cleanResult);
-      }
-      if (!silent && _isCurrentConversation(conversationVersion)) {
-        _showStatusDialog();
-      }
-    } catch (e) {
-      if (_isCurrentConversation(conversationVersion) &&
-          operation == _statusOperation) {
-        snackBarAlert(context, "${I18n.t('get_status_failed')}: $e");
-      }
-    } finally {
-      _closeDialogRoute(progressRoute);
-      if (mounted && operation == _statusOperation) {
-        setState(() => _isGettingStatus = false);
-      }
-    }
-  }
-
   /// 16.6 开始新聊天：确认后清空消息并重建开场白（原 refresh 按钮功能）
   void _confirmNewChat() {
     showDialog(
@@ -2182,6 +2029,9 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
           setVoiceModel(student[15]), // 15.16.1：角色级 TTS 模型
           setPersonality(student[14]), // 15.17：角色性格
           setChatBackground(student.length > 13 ? student[13] : ''), // 18.2：角色背景
+          setVoiceUrl(student.length > 16 ? student[16] : ''), // 18.x：声音复刻 URL
+          setVoicePrompt(student.length > 17 ? student[17] : ''), // 18.x：声音设计描述
+          setAppearancePrompt(student.length > 18 ? student[18] : ''), // 18.x：样貌描述
         ]);
         if (!mounted) return true;
         await clearMsg(true);
@@ -2210,81 +2060,10 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
   }
 
   Widget _buildChatPage() {
+    // 顶部 AppBar 已整体移除（小屏省空间）：背景图延伸到状态栏后面，
+    // 聊天内容用 SafeArea 顶边避开状态栏，从屏幕最顶部开始就是背景和聊天
     return Scaffold(
       key: ValueKey(_displaySettingsKey),
-      appBar: _isFullScreen
-          ? null // Hide the AppBar in fullscreen mode
-          : AppBar(
-              title: const SizedBox(
-                  height: 22,
-                  child: Image(
-                      image: AssetImage("assets/aidazi.png"),
-                      fit: BoxFit.fitHeight)),
-              flexibleSpace: Container(
-                decoration: const BoxDecoration(
-                  color: primaryBlue,
-                ),
-              ),
-              actions: <Widget>[
-                // Status
-                IconButton(
-                  icon: const Icon(Icons.monitor_heart),
-                  color: Colors.white,
-                  onPressed: () {
-                    getStatus();
-                  },
-                ),
-                // 16.6 顶部菜单合并：保存本次聊天 / 提取聊天记录 / 开始新聊天
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_horiz, color: Colors.white),
-                  onSelected: (value) {
-                    switch (value) {
-                      case 'save_chat':
-                        _showSaveChatDialog();
-                        break;
-                      case 'load_chat':
-                        _showLoadChatDialog();
-                        break;
-                      case 'new_chat':
-                        _confirmNewChat();
-                        break;
-                    }
-                  },
-                  itemBuilder: (context) => [
-                    PopupMenuItem(
-                      value: 'save_chat',
-                      child: Row(
-                        children: [
-                          const Icon(Icons.save, color: primaryBlue),
-                          const SizedBox(width: 8),
-                          Text(I18n.t('menu_save_chat')),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'load_chat',
-                      child: Row(
-                        children: [
-                          const Icon(Icons.folder_open, color: primaryBlue),
-                          const SizedBox(width: 8),
-                          Text(I18n.t('menu_load_chat')),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'new_chat',
-                      child: Row(
-                        children: [
-                          const Icon(Icons.refresh, color: primaryBlue),
-                          const SizedBox(width: 8),
-                          Text(I18n.t('menu_new_chat')),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
       body: Container(
         decoration: BoxDecoration(image: backgroundImage),
         child: GestureDetector(
@@ -2294,7 +2073,10 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
               _isToolsExpanded = false;
             });
           },
-          child: Column(
+          child: SafeArea(
+            top: true,
+            bottom: false,
+            child: Column(
             children: [
               Expanded(
                 child: _isListViewMode
@@ -2481,13 +2263,9 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
                                       horizontal: 10,
                                       vertical: 8,
                                     ),
-                                    hintText: _isRecording
-                                        ? I18n.t('recording')
-                                        : _isTranscribing
-                                            ? I18n.t('transcribing')
-                                            : inputLock
-                                                ? I18n.t('replying')
-                                                : I18n.t('enter_message'),
+                                    hintText: inputLock
+                                        ? I18n.t('replying')
+                                        : I18n.t('enter_message'),
                                   ))),
                           const SizedBox(width: 5),
                           // tools button
@@ -2512,116 +2290,108 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
                     : const SizedBox.shrink(),
               ),
               // 工具栏展开区域
+              // 原顶部菜单三项（保存聊天/提取聊天/新聊天）随 AppBar 移除一并收口到这里；
+              // 固定两行 3+3 布局（上行：自动背景/自动发声/全屏，下行：聊天三项）
               if (_isToolsExpanded)
                 Container(
                   padding: const EdgeInsets.all(8.0),
                   decoration: BoxDecoration(
                     color: Theme.of(context).colorScheme.surfaceBright,
                   ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      // 16.9 录音键（长按录音，松手识别发送）：空闲浅蓝，录音中红色
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onLongPressStart: (_) =>
-                            unawaited(_startVoiceInput()),
-                        onLongPressEnd: (_) =>
-                            unawaited(_finishVoiceInput()),
-                        onTap: () =>
-                            snackBarAlert(context, I18n.t('hold_to_record')),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: _isRecording
-                                    ? Colors.red
-                                    : Theme.of(context)
-                                        .colorScheme
-                                        .surfaceContainerHighest,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Icon(
-                                _isRecording ? Icons.graphic_eq : Icons.mic,
-                                color: _isRecording ? Colors.white : accentBlue,
-                                size: 20,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            ConstrainedBox(
-                              constraints:
-                                  const BoxConstraints(maxWidth: 84),
-                              child: Text(
-                                I18n.t('hold_to_record'),
-                                textAlign: TextAlign.center,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: _isRecording
-                                      ? Colors.red
-                                      : Theme.of(context)
-                                          .colorScheme
-                                          .onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          // 15.1/14.14：自动背景开关（开启态视觉强调：实心图标着色 + 文字标注开/关）
+                          _buildToolButton(
+                            icon: _isAutoBackground
+                                ? Icons.wallpaper
+                                : Icons.wallpaper_outlined,
+                            label:
+                                "${I18n.t('auto_background')}：${I18n.t(_isAutoBackground ? 'on' : 'off')}",
+                            highlighted: _isAutoBackground,
+                            onTap: () {
+                              setState(() {
+                                _isAutoBackground = !_isAutoBackground;
+                                _isToolsExpanded = false;
+                              });
+                              setAutoBackground(_isAutoBackground);
+                            },
+                          ),
+                          _buildToolButton(
+                            icon: _isAutoVoice
+                                ? Icons.volume_up
+                                : Icons.volume_off,
+                            label:
+                                "${I18n.t('auto_voice')}：${I18n.t(_isAutoVoice ? 'on' : 'off')}",
+                            highlighted: _isAutoVoice,
+                            onTap: () {
+                              setState(() {
+                                _isAutoVoice = !_isAutoVoice;
+                                _isToolsExpanded = false;
+                              });
+                              setAutoVoice(_isAutoVoice);
+                              // 关闭自动发声时立即停止当前播放
+                              if (!_isAutoVoice) {
+                                unawaited(stopAudio());
+                              }
+                            },
+                          ),
+                          // Fullscreen button
+                          _buildToolButton(
+                            icon: _isFullScreen
+                                ? Icons.fullscreen_exit
+                                : Icons.fullscreen,
+                            label: _isFullScreen
+                                ? I18n.t('exit_fullscreen')
+                                : I18n.t('enter_fullscreen'),
+                            onTap: () {
+                              setState(() {
+                                _isFullScreen = !_isFullScreen;
+                                _isToolsExpanded = false; // 点击后收起工具栏
+                              });
+                            },
+                          ),
+                        ],
                       ),
-                      // 15.1/14.14：自动背景开关（开启态视觉强调：实心图标着色 + 文字标注开/关）
-                      _buildToolButton(
-                        icon: _isAutoBackground
-                            ? Icons.wallpaper
-                            : Icons.wallpaper_outlined,
-                        label:
-                            "${I18n.t('auto_background')}：${I18n.t(_isAutoBackground ? 'on' : 'off')}",
-                        highlighted: _isAutoBackground,
-                        onTap: () {
-                          setState(() {
-                            _isAutoBackground = !_isAutoBackground;
-                            _isToolsExpanded = false;
-                          });
-                          setAutoBackground(_isAutoBackground);
-                        },
-                      ),
-                      _buildToolButton(
-                        icon: _isAutoVoice ? Icons.volume_up : Icons.volume_off,
-                        label:
-                            "${I18n.t('auto_voice')}：${I18n.t(_isAutoVoice ? 'on' : 'off')}",
-                        highlighted: _isAutoVoice,
-                        onTap: () {
-                          setState(() {
-                            _isAutoVoice = !_isAutoVoice;
-                            _isToolsExpanded = false;
-                          });
-                          setAutoVoice(_isAutoVoice);
-                          // 关闭自动发声时立即停止当前播放
-                          if (!_isAutoVoice) {
-                            unawaited(stopAudio());
-                          }
-                        },
-                      ),
-                      // Fullscreen button
-                      _buildToolButton(
-                        icon: _isFullScreen
-                            ? Icons.fullscreen_exit
-                            : Icons.fullscreen,
-                        label: _isFullScreen
-                            ? I18n.t('exit_fullscreen')
-                            : I18n.t('enter_fullscreen'),
-                        onTap: () {
-                          setState(() {
-                            _isFullScreen = !_isFullScreen;
-                          });
-                        },
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          // 16.6 原顶部菜单三项收口到 + 菜单
+                          _buildToolButton(
+                            icon: Icons.save,
+                            label: I18n.t('menu_save_chat'),
+                            onTap: () {
+                              setState(() => _isToolsExpanded = false);
+                              _showSaveChatDialog();
+                            },
+                          ),
+                          _buildToolButton(
+                            icon: Icons.folder_open,
+                            label: I18n.t('menu_load_chat'),
+                            onTap: () {
+                              setState(() => _isToolsExpanded = false);
+                              _showLoadChatDialog();
+                            },
+                          ),
+                          _buildToolButton(
+                            icon: Icons.refresh,
+                            label: I18n.t('menu_new_chat'),
+                            onTap: () {
+                              setState(() => _isToolsExpanded = false);
+                              _confirmNewChat();
+                            },
+                          ),
+                        ],
                       ),
                     ],
                   ),
                 ),
             ],
+            ),
           ),
         ),
       ),
@@ -2751,46 +2521,11 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
                 // 15.4 新增故事：纯文本编辑框书写后保存
+                // （故事导入/导出已收口局域网网页，App 内不再提供——15.5）
                 ElevatedButton.icon(
                   icon: const Icon(Icons.add),
                   label: Text(I18n.t('add_story')),
                   onPressed: () => _showAddStoryDialog(),
-                ),
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.file_upload),
-                  label: Text(I18n.t('import_story')),
-                  onPressed: () async {
-                    String? jsonString = await pickFile();
-                    if (jsonString != null) {
-                      await restoreHistoryFromJson(jsonString);
-                      getHistorys().then((List<List<String>> results) {
-                        setState(() {
-                          historys = results;
-                          historys.sort((a, b) =>
-                              int.parse(b[1]).compareTo(int.parse(a[1])));
-                        });
-                        snackBarAlert(context, I18n.t('story_imported'));
-                      });
-                    }
-                  },
-                ),
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.file_download),
-                  label: Text(I18n.t('export_story')),
-                  onPressed: () async {
-                    if (currentStory == null) {
-                      snackBarAlert(context, I18n.t('no_current_story'));
-                      return;
-                    }
-                    List<Message> storyMsgs = jsonToMsg(currentStory![2]);
-                    List<String> msgContents =
-                        storyMsgs.map((m) => m.message).toList();
-                    bool success = await downloadHistorytoJson(
-                        currentStory![0], msgContents);
-                    if (success && context.mounted) {
-                      snackBarAlert(context, I18n.t('story_exported'));
-                    }
-                  },
                 ),
               ],
             ),
@@ -3074,8 +2809,31 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
               children: [
                 ElevatedButton.icon(
                     icon: const Icon(Icons.file_upload),
-                    label: Text(I18n.t('import_character')),
+                    label: Text(I18n.t(
+                        kIsWeb ? 'import_character' : 'web_import_character')),
                     onPressed: () async {
+                      // 19.7：io 平台统一走局域网网页导入（上传/入池/enrollment
+                      // 均在配置服务内完成）；Web 保留原 file_picker 路径
+                      if (!kIsWeb) {
+                        await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const LanConfigPage(
+                                    forCharacterImport: true)));
+                        // 第二十四章：角色导入页与密钥配置共用服务，保险刷新
+                        await _reloadCurrentConfig();
+                        if (mounted) {
+                          // 刷新角色池列表（当前角色不变，不 clearMsg）
+                          getStudents().then((List<List<String>> results) {
+                            if (!mounted) return;
+                            setState(() {
+                              students = results;
+                              students.sort((a, b) => a[0].compareTo(b[0]));
+                            });
+                          });
+                        }
+                        return;
+                      }
                       // 18.2 / 18.6：导入角色卡 → 入池（不切换当前角色）
                       // try/finally 确保任何异常都能关闭加载对话框（防卡死）
                       showDialog(
@@ -3149,33 +2907,7 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
                         }
                       }
                     }),
-                ElevatedButton.icon(
-                    icon: const Icon(Icons.file_download),
-                    label: Text(I18n.t('export_character')),
-                    onPressed: () async {
-                      // 显示加载对话框
-                      showDialog(
-                        context: context,
-                        barrierDismissible: false,
-                        builder: (BuildContext context) {
-                          return AlertDialog(
-                            content: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const CircularProgressIndicator(),
-                                const SizedBox(height: 16),
-                                Text(I18n.t('exporting_character')),
-                              ],
-                            ),
-                          );
-                        },
-                      );
-                      await downloadCharacterCard(
-                        context,
-                      );
-                      if (!context.mounted) return;
-                      Navigator.pop(context);
-                    }),
+                // （角色导出已收口局域网网页卡片⑥，App 内不再提供——15.6）
               ],
             ),
           ),
@@ -3344,6 +3076,9 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
                             setVoiceModel(student[15]), // 15.16.1：角色级 TTS 模型
                             setPersonality(student[14]), // 15.17：角色性格
                             setChatBackground(student.length > 13 ? student[13] : ''), // 18.2：角色背景
+                            setVoiceUrl(student.length > 16 ? student[16] : ''), // 18.x：声音复刻 URL
+                            setVoicePrompt(student.length > 17 ? student[17] : ''), // 18.x：声音设计描述
+                            setAppearancePrompt(student.length > 18 ? student[18] : ''), // 18.x：样貌描述
                           ]);
                           if (!mounted ||
                               operation != _characterSwitchOperation) {
@@ -3480,14 +3215,16 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
             child: ListTile(
               leading: const Icon(Icons.settings),
               title: Text(I18n.t('model_config')),
-              onTap: () {
-                Navigator.push(
+              onTap: () async {
+                await Navigator.push(
                   context,
                   MaterialPageRoute(
                     builder: (context) => ConfigPage(
                         updateFunc: updateConfig, currentConfig: config),
                   ),
                 );
+                // 第二十四章：设置页内网页保存三要素后刷新（绕过 updateFunc 回调）
+                await _reloadCurrentConfig();
               },
             ),
           ),
@@ -3554,47 +3291,119 @@ class MainPageState extends State<MainPage> with WidgetsBindingObserver {
             child: ListTile(
               leading: const Icon(Icons.info),
               title: Text(I18n.t('about')),
-              onTap: () {
+              onTap: () async {
+                // 14.x 设备模式：预读开关状态（开启时关于弹窗常显开关行，便于关闭）
+                final bool dmEnabled = await DeviceMode.isEnabled();
+                final SharedPreferences dmPrefs =
+                    await SharedPreferences.getInstance();
+                bool dmGuideShown =
+                    dmPrefs.getBool('device_mode_guide_shown') ?? false;
+                int dmTaps = 0;
+                bool dmUnlocked = false;
+                bool dmOn = dmEnabled;
+                if (!mounted) return;
                 showDialog(
                   context: context,
-                  builder: (context) => AlertDialog(
-                    title: Text(I18n.t('about')),
-                    content: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(I18n.t('about_text')),
-                          const SizedBox(height: 16),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(8.0),
-                            child: Image.asset(
-                              'assets/wechat_qr.jpg',
-                              width: 200,
-                              height: 200,
-                              fit: BoxFit.cover,
+                  builder: (context) => StatefulBuilder(
+                    builder: (context, setDialogState) => AlertDialog(
+                      title: Text(I18n.t('about')),
+                      content: SingleChildScrollView(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(I18n.t('about_text')),
+                            const SizedBox(height: 16),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8.0),
+                              child: Image.asset(
+                                'assets/wechat_qr.jpg',
+                                width: 200,
+                                height: 200,
+                                fit: BoxFit.cover,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            I18n.t('author_wechat'),
-                            style: const TextStyle(
-                                fontSize: 13, color: Colors.grey),
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            '提供角色人物复刻、减脂搭子、健身搭子、瑜伽搭子、育儿搭子、亲密搭子等。',
-                            style: TextStyle(fontSize: 13),
-                            textAlign: TextAlign.center,
-                          ),
-                        ],
+                            const SizedBox(height: 8),
+                            Text(
+                              I18n.t('author_wechat'),
+                              style: const TextStyle(
+                                  fontSize: 13, color: Colors.grey),
+                            ),
+                            const SizedBox(height: 16),
+                            // 14.x 隐藏入口：仅 Android，连点介绍文字 7 次解锁设备模式开关
+                            if (DeviceMode.isSupported)
+                              GestureDetector(
+                                onTap: () {
+                                  dmTaps++;
+                                  if (dmTaps >= 7 && !dmUnlocked) {
+                                    setDialogState(() => dmUnlocked = true);
+                                  }
+                                },
+                                child: const Text(
+                                  '提供角色人物复刻、减脂搭子、健身搭子、瑜伽搭子、育儿搭子、亲密搭子等。',
+                                  style: TextStyle(fontSize: 13),
+                                  textAlign: TextAlign.center,
+                                ),
+                              )
+                            else
+                              const Text(
+                                '提供角色人物复刻、减脂搭子、健身搭子、瑜伽搭子、育儿搭子、亲密搭子等。',
+                                style: TextStyle(fontSize: 13),
+                                textAlign: TextAlign.center,
+                              ),
+                            // 开关行：仅连点 7 次解锁后显示（与开关状态无关，
+                            // 关闭已开启的模式也需再次解锁，确保普通用户永远看不到）
+                            if (DeviceMode.isSupported && dmUnlocked) ...[
+                              const Divider(height: 24),
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(I18n.t('device_mode_title')),
+                                subtitle: Text(
+                                  I18n.t('device_mode_subtitle'),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                value: dmOn,
+                                onChanged: (v) async {
+                                  final ok = await DeviceMode.setEnabled(v);
+                                  if (!ok) return;
+                                  setDialogState(() => dmOn = v);
+                                  // 首次开启弹一次性须知
+                                  if (v && !dmGuideShown) {
+                                    dmGuideShown = true;
+                                    await dmPrefs.setBool(
+                                        'device_mode_guide_shown', true);
+                                    if (!context.mounted) return;
+                                    showDialog(
+                                      context: context,
+                                      builder: (context) => AlertDialog(
+                                        title: Text(
+                                            I18n.t('device_mode_guide_title')),
+                                        content: SingleChildScrollView(
+                                          child: Text(
+                                              I18n.t('device_mode_guide_body')),
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context),
+                                            child: const Text('OK'),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }
+                                },
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('OK'),
+                        ),
+                      ],
                     ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('OK'),
-                      ),
-                    ],
                   ),
                 );
               },

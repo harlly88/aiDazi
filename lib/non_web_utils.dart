@@ -27,16 +27,6 @@ Future<bool> writeFile(String data) async {
   }
 }
 
-Future<bool> writePngFile(Uint8List outputBytes) async {
-  return _saveBytes(
-    outputBytes,
-    dialogTitle: '请保存角色卡',
-    fileName:
-        'aiDaziCard_${getTimeStr(DateTime.now().millisecondsSinceEpoch)}.png',
-    allowedExtension: 'png',
-  );
-}
-
 Future<bool> _saveBytes(
   Uint8List bytes, {
   required String dialogTitle,

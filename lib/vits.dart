@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'secure_key_store.dart';
 import 'storage.dart';
 import 'tts_provider.dart';
 import 'utils.dart';
@@ -95,16 +96,19 @@ Future<void> playAudio(BuildContext context, String audioSource) async {
 ///
 /// 15.7：返回值为本地临时文件路径（非远程 URL），缓存与播放均走本地文件
 Future<String?> getAudio(BuildContext context, String query) async {
-  final apiKey = await getAliyunApiKey();
+  // 19.3：语音能力改读独立槽位 key_tts（互不回落）
+  final apiKey = await getTtsApiKey();
   if (apiKey == null || apiKey.isEmpty) {
-    throw Exception('未配置阿里云百炼 API Key，请先在 设置 → 模型配置 中选择千问模板并填入 API Key');
+    throw Exception(keyNotSetError('语音'));
   }
 
   final fallbackVoice = await getTtsFallbackVoice();
   final roleVoiceId = await getVoiceId();
   final roleVoiceModel = await getVoiceModel();
   final globalTtsModel = await getTtsModel();
-  final client = BailianTtsClient(apiKey: apiKey);
+  // 第二十章：接口地址可独立配置（空 = 官方默认）
+  final client =
+      BailianTtsClient(apiKey: apiKey, baseUrl: await getTtsBaseUrl());
 
   if (roleVoiceId.isEmpty) {
     // 角色未设置音色：直接用兜底音色（系统音色恒用全局模型）

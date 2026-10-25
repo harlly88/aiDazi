@@ -4,7 +4,6 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:aidazi/storage.dart';
-import 'environment_provider.dart';
 
 
 // type 1:asstant 2:user 3:system 4:timestamp
@@ -86,9 +85,10 @@ String buildTimeInjection([DateTime? now]) {
       '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 }
 
-/// 组装上下文注入消息（15.9/15.11/15.17/16.4）：时间、用户信息、环境（定位/天气）、角色性格
+/// 组装上下文注入消息（15.9/15.17/16.4）：时间、用户信息、角色性格
 ///
 /// 插入位置：角色描述之后、世界观/聊天记录之前；全部为空时返回空列表
+/// 26.1-4/5：生日与位置/天气注入已删除（隐私收敛）
 Future<List<String>> buildContextInjections() async {
   final injections = <String>[];
 
@@ -102,17 +102,10 @@ Future<List<String>> buildContextInjections() async {
       if (profile.name.isNotEmpty) '称呼：${profile.name}',
       if (profile.occupation.isNotEmpty) '职业：${profile.occupation}',
       if (profile.age.isNotEmpty) '年龄：${profile.age}',
-      if (profile.birthday.isNotEmpty) '生日：${profile.birthday}',
       if (profile.other.isNotEmpty) '其他：${profile.other}',
     ];
     injections.add(
-        '【用户信息】${parts.join('；')}。请在合适的时机自然使用这些信息（如以称呼相称、生日时主动祝福）。');
-  }
-
-  // 15.10/15.11：环境（定位 + 天气，开关开启且缓存有效时注入）
-  final env = await getEnvironmentInjection();
-  if (env.isNotEmpty) {
-    injections.add(env);
+        '【用户信息】${parts.join('；')}。请在合适的时机自然使用这些信息（如以称呼相称）。');
   }
 
   // 15.17：角色性格

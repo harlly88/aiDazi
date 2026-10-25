@@ -32,6 +32,28 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- 14.x 设备模式：开机广播接收器（默认关闭，由关于弹窗隐藏开关运行时启用） -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- MTK 联发科定制开机广播，工控小机触发更稳 -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <!-- 解锁备份触发：部分 ROM 开机广播投递晚/被拦，解锁时再拉一次看门狗 -->
+                <action android:name="android.intent.action.USER_PRESENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 14.x 设备模式：前台看门狗服务（拉起主界面 + 崩溃/被杀拉活） -->
+        <service
+            android:name=".WatchdogService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -39,11 +61,16 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- 14.x 设备模式：开机自启 + 前台看门狗（隐藏开关，默认关闭） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <!-- 前台服务类型声明，Android 14+ 强制，提前加上无害 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- 悬浮窗权限：让主界面能从后台顶到最前（adb 授权，增强拉起稳定性） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>

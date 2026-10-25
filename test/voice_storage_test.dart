@@ -74,27 +74,4 @@ void main() {
     await removeBgImage('bg1.png');
     expect(await getBgImages(), ['bg2.png']);
   });
-
-  test('aliyun api key falls back to a dashscope chat config', () async {
-    SharedPreferences.setMockInitialValues({
-      'api_千问': [
-        'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        'qwen-key',
-        'qwen-plus',
-      ],
-      'api_DeepSeek': [
-        'https://api.deepseek.com/v1',
-        'ds-key',
-        'deepseek-chat',
-      ],
-    });
-
-    // 未单独配置 aliyun_api_key 时，回退到千问对话配置的 Key
-    final fallback = await getAliyunApiKey();
-    expect(fallback, 'qwen-key');
-
-    // 单独配置后优先生效（供 TTS/ASR/生图/生视频复用）
-    await setAliyunApiKey('shared-key');
-    expect(await getAliyunApiKey(), 'shared-key');
-  });
 }

@@ -15,9 +15,12 @@ import 'non_web_utils.dart' if (dart.library.html) 'web_utils.dart';
 import 'i18n.dart';
 
 // List 0:base_url 1:api_key 2:model_name 3:temperature 4:frequency_penalty 5:presence_penalty 6:max_tokens
+// 19.3：LLM 密钥改存 secure storage（key_llm_{name}）；io 平台保存时 apiKey 恒写空串占位
+// （保持 Config 结构兼容不迁移 schema）；Web 平台保留旧行为（回落 Config.apiKey）
 Future<void> setApiConfig(Config config) async {
   final SharedPreferences prefs = await SharedPreferences.getInstance();
-  List<String> configList = [config.baseUrl, config.apiKey, config.model];
+  final String storedKey = kIsWeb ? config.apiKey : '';
+  List<String> configList = [config.baseUrl, storedKey, config.model];
   if (config.temperature != null) {
     configList.add(config.temperature!);
   } else {
@@ -45,7 +48,26 @@ Future<void> setApiConfig(Config config) async {
 Future<void> setCurrentApiConfig(String name) async {
   final SharedPreferences prefs = await SharedPreferences.getInstance();
   await prefs.setString("current_api", "api_$name");
-  debugPrint("set current api $name");
+}
+
+// ===== 预置 LLM 模板（第二十二章：原 configpage 私有 _presetConfigs 移此公开，
+// 供设置页补齐与局域网配置服务共用；预设项不可删除，与 agent.md 第三章 3.1 一致） =====
+
+final List<Config> presetConfigs = [
+  Config(name: "qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", model: "qwen3.7-flash", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+  Config(name: "deepseek", baseUrl: "https://api.deepseek.com/v1", apiKey: "", model: "deepseek-chat", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+  Config(name: "doubao", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", apiKey: "", model: "doubao-seed-1-6", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+  Config(name: "glm", baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", model: "glm-4.6", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+  Config(name: "kimi", baseUrl: "https://api.moonshot.cn/v1", apiKey: "", model: "kimi-k2-turbo-preview", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+  Config(name: "custom", baseUrl: "", apiKey: "", model: "", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
+];
+
+/// 按名称取预置模板（找不到返回 null）
+Config? findPresetConfig(String name) {
+  for (final c in presetConfigs) {
+    if (c.name == name) return c;
+  }
+  return null;
 }
 
 Future<void> deleteApiConfig(String name) async {
@@ -335,14 +357,12 @@ class UserProfile {
   String name; // 对我的称呼（非空时替换 {{user}} 宏取值来源）
   String occupation; // 职业
   String age; // 年龄
-  String birthday; // 生日（MM-dd）
   String other; // 其他个人信息
 
   UserProfile({
     this.name = "",
     this.occupation = "",
     this.age = "",
-    this.birthday = "",
     this.other = "",
   });
 
@@ -350,14 +370,12 @@ class UserProfile {
       name.isEmpty &&
       occupation.isEmpty &&
       age.isEmpty &&
-      birthday.isEmpty &&
       other.isEmpty;
 
   Map<String, dynamic> toJson() => {
         'name': name,
         'occupation': occupation,
         'age': age,
-        'birthday': birthday,
         'other': other,
       };
 
@@ -365,7 +383,7 @@ class UserProfile {
         name: json['name']?.toString() ?? "",
         occupation: json['occupation']?.toString() ?? "",
         age: json['age']?.toString() ?? "",
-        birthday: json['birthday']?.toString() ?? "",
+        // 26.1-4：birthday 字段已删除（隐私），旧数据静默忽略
         other: json['other']?.toString() ?? "",
       );
 }
@@ -672,27 +690,6 @@ Future<String> getDrawCharPrompt({bool isDefault = false}) async {
   return prompt;
 }
 
-// 阿里云百炼 API Key：LLM(千问)/TTS(CosyVoice)/ASR(Paraformer)/文生图(万相)/文生视频共用
-Future<void> setAliyunApiKey(String apiKey) async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  await prefs.setString("aliyun_api_key", apiKey);
-}
-
-Future<String?> getAliyunApiKey() async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  final key = prefs.getString("aliyun_api_key");
-  if (key != null && key.isNotEmpty) return key;
-  // 回退：复用当前对话模型为千问的配置中的 API Key
-  final configs = await getApiConfigs();
-  for (final c in configs) {
-    if (c.baseUrl.contains("dashscope.aliyuncs.com") &&
-        c.apiKey.isNotEmpty) {
-      return c.apiKey;
-    }
-  }
-  return null;
-}
-
 // ===== 模型名配置（15.16：官方可能下线/升级模型，全部可编辑） =====
 
 // TTS 合成模型（默认 cosyvoice-v3-flash；复用外部注册的 voice_id 时须与注册时一致）
@@ -706,18 +703,7 @@ Future<String> getTtsModel() async {
   return prefs.getString("tts_model") ?? "cosyvoice-v3-flash";
 }
 
-// ASR 识别模型（默认 qwen3-asr-flash，百炼 OpenAI 兼容端点）
-Future<void> setAsrModel(String model) async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  await prefs.setString("asr_model", model);
-}
-
-Future<String> getAsrModel() async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  return prefs.getString("asr_model") ?? "qwen3-asr-flash";
-}
-
-// 生视频模型（默认 wan2.7-t2v）
+// 生视频模型（默认 wan3.0-video-prime，文生/图生均支持）
 Future<void> setVideoModel(String model) async {
   final SharedPreferences prefs = await SharedPreferences.getInstance();
   await prefs.setString("video_model", model);
@@ -725,7 +711,46 @@ Future<void> setVideoModel(String model) async {
 
 Future<String> getVideoModel() async {
   final SharedPreferences prefs = await SharedPreferences.getInstance();
-  return prefs.getString("video_model") ?? "wan2.7-t2v";
+  return prefs.getString("video_model") ?? "wan3.0-video-prime";
+}
+
+// ===== 接口地址配置（第二十章：每项能力可指向独立服务，空 = 官方默认） =====
+
+const String defaultTtsBaseUrl = 'https://dashscope.aliyuncs.com';
+const String defaultImageBaseUrl = 'https://dashscope.aliyuncs.com';
+const String defaultVideoBaseUrl = 'https://dashscope.aliyuncs.com';
+
+Future<void> setTtsBaseUrl(String url) async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  await prefs.setString("tts_base_url", url);
+}
+
+Future<String> getTtsBaseUrl() async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  final url = prefs.getString("tts_base_url") ?? '';
+  return url.isEmpty ? defaultTtsBaseUrl : url;
+}
+
+Future<void> setImageBaseUrl(String url) async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  await prefs.setString("image_base_url", url);
+}
+
+Future<String> getImageBaseUrl() async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  final url = prefs.getString("image_base_url") ?? '';
+  return url.isEmpty ? defaultImageBaseUrl : url;
+}
+
+Future<void> setVideoBaseUrl(String url) async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  await prefs.setString("video_base_url", url);
+}
+
+Future<String> getVideoBaseUrl() async {
+  final SharedPreferences prefs = await SharedPreferences.getInstance();
+  final url = prefs.getString("video_base_url") ?? '';
+  return url.isEmpty ? defaultVideoBaseUrl : url;
 }
 
 // TTS 兜底音色（角色无专属音色/声纹失效时回落使用，见 tts_provider.dart systemVoices）
@@ -757,7 +782,7 @@ Future<(String, String)> getWanImageConfig() async {
   return (model, size);
 }
 
-// 万相文生视频配置（wan2.7-t2v：分辨率 720P/1080P，比例，时长 2-15 秒）
+// 万相文生视频配置（wan3.0-video-prime：分辨率 720P/1080P，比例，时长 2-15 秒）
 Future<void> setWanVideoConfig(String resolution, String ratio, int duration) async {
   final SharedPreferences prefs = await SharedPreferences.getInstance();
   await prefs.setString("wan_video_resolution", resolution);
@@ -811,20 +836,6 @@ Future<String> getWelcomePrompt() async {
   String? format = prefs.getString("welcome_prompt");
   if (format == null || format.isEmpty) {
     return I18n.t('default_welcome_prompt');
-  }
-  return format;
-}
-
-Future<void> setStatusPrompt(String format) async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  await prefs.setString("status_prompt", format);
-}
-
-Future<String> getStatusPrompt() async {
-  final SharedPreferences prefs = await SharedPreferences.getInstance();
-  String? format = prefs.getString("status_prompt");
-  if (format == null || format.isEmpty) {
-    return I18n.t('default_status_prompt');
   }
   return format;
 }
@@ -998,110 +1009,69 @@ Future<void> restoreHistoryFromJson(jsonString) async {
   }
 }
 
-Future<bool> downloadHistorytoJson(String name, List<String> msgs) async {
-  List<Map<String, dynamic>> entries = [];
-  for (int i = 0; i < msgs.length; i++) {
-    entries.add({
-      'keys': [],
-      'content': msgs[i],
-      'extensions': {},
-      'enabled': true,
-      'insertion_order': i,
-      'constant': true, // Always include in the prompt
-    });
-  }
-
-  Map<String, dynamic> characterBook = {
-    'name': name,
-    'description': '', // You can add a description if available
-    'extensions': {},
-    'entries': entries,
-  };
-
-  return writeFile(jsonEncode(characterBook));
+/// 19.8：导入结果（studentKey = 新入池记录完整 key；warnings = 非致命提示）
+class CharacterImportResult {
+  final String studentKey;
+  final String name;
+  final String voiceUrl;
+  final String voicePrompt;
+  final String appearancePrompt;
+  final List<String> warnings;
+  const CharacterImportResult({
+    required this.studentKey,
+    required this.name,
+    required this.voiceUrl,
+    required this.voicePrompt,
+    required this.appearancePrompt,
+    required this.warnings,
+  });
 }
 
-Future<String?> pickFile() async {
-  FilePickerResult? result = await FilePicker.platform.pickFiles(
-    // Some Android 9 document providers do not handle application/json MIME
-    // filters. Pick any openable document and validate its JSON after reading.
-    type: FileType.any,
-    withData: false,
-    withReadStream: true,
-  );
-  if (result != null) {
-    final file = result.files.single;
-    debugPrint('File selected: ${file.name} (${file.size} bytes)');
-    return readPickedFileContent(file);
-  } else {
-    debugPrint("No file selected, $result");
-    return null;
-  }
-}
-
-Future<String> readPickedFileContent(PlatformFile file) async {
-  if (file.readStream != null) {
-    return utf8.decoder.bind(file.readStream!).join();
-  }
-  if (file.bytes != null) {
-    return utf8.decode(file.bytes!);
-  }
-  if (!kIsWeb && file.path != null) {
-    return File(file.path!).readAsString();
-  }
-  throw const FileSystemException('Selected file has no readable content.');
-}
-
-/// 18.2 / 18.6：导入角色卡
-/// 解析 chara JSON → 头像/参考图落地为本地文件 → addStudent 入池（不覆写当前工作态）
-/// 返回新入池记录的 student key（供 main.dart 后续 enrollment 写 voice_id/refImage）
-Future<String?> loadCharacterCard(context) async {
-  // 1. 让用户选择一个 PNG 或 JSON 文件
-  FilePickerResult? result = await FilePicker.platform.pickFiles(
-    type: FileType.custom,
-    allowedExtensions: ['png', 'json'],
-    withData: true,
-  );
-
-  if (result == null || result.files.single.bytes == null) {
-    snackBarAlert(context, "未选择文件。");
-    return null;
+/// 19.8：角色卡核心解析与入池（无 file_picker 依赖），网页导入与 Web 壳共用。
+///
+/// PNG tEXt 'chara' 块 / JSON 解析 → 18.2 / 18.6 入池规则（不切换当前角色、
+/// 不写工作态、按完整 key 唯一匹配、大卡头像落本地文件不进 SharedPreferences）
+/// → 返回新角色 key 与 warnings；致命错误（解码失败 / 格式无效 / 缺名称）直接
+/// throw，由调用方转提示。[context] 非空时保留 character_book 确认 Dialog 与
+/// SnackBar 提示（Web 壳路径行为不变）；网页路径（无 context）角色书跳过并记 warning。
+Future<CharacterImportResult> importCharacterCardBytes(
+    Uint8List fileBytes, String filename,
+    {BuildContext? context}) async {
+  final warnings = <String>[];
+  void warn(String msg) {
+    warnings.add(msg);
+    if (context != null) snackBarAlert(context, msg);
   }
 
-  final fileBytes = result.files.single.bytes!;
   String jsonString = '';
-  if (result.files.single.extension == 'png') {
-    // 2-6. 解码 PNG → 读取 'chara' tEXt → base64 → utf8
+  final isPng = filename.toLowerCase().endsWith('.png');
+  if (isPng) {
+    // 解码 PNG → 读取 'chara' tEXt → base64 → utf8
     final image = img.decodePng(fileBytes);
     if (image == null) {
-      snackBarAlert(context, "无法解码 PNG。");
-      return null;
+      throw Exception("无法解码 PNG。");
     }
     final rawData = image.textData?['chara'];
     if (rawData == null) {
-      snackBarAlert(context, I18n.t('chara_metadata_not_found'));
-      return null;
+      throw Exception(I18n.t('chara_metadata_not_found'));
     }
     try {
       jsonString = utf8.decode(base64Decode(rawData));
     } catch (e) {
-      snackBarAlert(context, "${I18n.t('decode_chara_error')}$e");
-      return null;
+      throw Exception("${I18n.t('decode_chara_error')}$e");
     }
   } else {
     jsonString = utf8.decode(fileBytes);
   }
 
   if (jsonString.isEmpty) {
-    snackBarAlert(context, I18n.t('json_empty'));
-    return null;
+    throw Exception(I18n.t('json_empty'));
   }
 
-  // 7. 解析 JSON，收集字段到局部变量（不写工作态，最后统一入池）
+  // 解析 JSON，收集字段到局部变量（不写工作态，最后统一入池）
   final allPrefs = jsonDecode(jsonString);
   if (allPrefs is! Map<String, dynamic> || !allPrefs.containsKey("data")) {
-    snackBarAlert(context, "角色卡格式无效。");
-    return null;
+    throw Exception("角色卡格式无效。");
   }
 
   final data = allPrefs["data"] as Map<String, dynamic>;
@@ -1122,32 +1092,36 @@ Future<String?> loadCharacterCard(context) async {
   String voiceRefUrl = '';
   String refImageUrl = '';
 
-  // character_book 导入（保留原逻辑）
+  // character_book 导入（19.8：context 非空保留确认 Dialog；网页路径跳过 + warning）
   if (data.containsKey("character_book")) {
     final characterBook = data['character_book'];
     if (characterBook != null && characterBook is Map<String, dynamic>) {
-      final bool? confirmImport = await showDialog<bool>(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: Text(I18n.t('import_character_book')),
-            content: Text(I18n.t('import_character_book_msg')),
-            actions: <Widget>[
-              TextButton(
-                child: Text(I18n.t('cancel')),
-                onPressed: () => Navigator.of(context).pop(false),
-              ),
-              TextButton(
-                child: Text(I18n.t('import_character')),
-                onPressed: () => Navigator.of(context).pop(true),
-              ),
-            ],
-          );
-        },
-      );
-      if (confirmImport == true) {
-        await restoreHistoryFromJson(jsonEncode(characterBook));
-        snackBarAlert(context, I18n.t('character_book_imported'));
+      if (context != null) {
+        final bool? confirmImport = await showDialog<bool>(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: Text(I18n.t('import_character_book')),
+              content: Text(I18n.t('import_character_book_msg')),
+              actions: <Widget>[
+                TextButton(
+                  child: Text(I18n.t('cancel')),
+                  onPressed: () => Navigator.of(context).pop(false),
+                ),
+                TextButton(
+                  child: Text(I18n.t('import_character')),
+                  onPressed: () => Navigator.of(context).pop(true),
+                ),
+              ],
+            );
+          },
+        );
+        if (confirmImport == true) {
+          await restoreHistoryFromJson(jsonEncode(characterBook));
+          snackBarAlert(context, I18n.t('character_book_imported'));
+        }
+      } else {
+        warn('角色书导入已跳过（角色书请通过 App 内聊天记录导入入口处理）');
       }
     }
   }
@@ -1177,7 +1151,7 @@ Future<String?> loadCharacterCard(context) async {
           base64Decode(refImageData));
     } catch (e) {
       debugPrint("ref_image_data import failed: $e");
-      snackBarAlert(context, "参考图导入失败：$e");
+      warn("参考图导入失败：$e");
     }
   }
   // 若没有内嵌图，回退到 URL 字段（同账号备份恢复线索）
@@ -1185,10 +1159,30 @@ Future<String?> loadCharacterCard(context) async {
     refImagePath = refImageUrl;
   }
 
+  // 25.4：bg_images_data base64 逐张落地为本地文件（空则回退参考图作首张背景，维持旧行为）
+  String bgImagesValue = '';
+  final bgImagesData = data["extensions"]?["bg_images_data"];
+  if (bgImagesData is List && bgImagesData.isNotEmpty) {
+    final paths = <String>[];
+    for (final b in bgImagesData) {
+      if (b is String && b.isNotEmpty) {
+        try {
+          paths.add(await _writeLocalMediaFile(
+              "bg_image_${DateTime.now().millisecondsSinceEpoch}_${paths.length}.png",
+              base64Decode(b)));
+        } catch (e) {
+          debugPrint("bg_image import failed: $e");
+          warn("背景图导入失败：$e");
+        }
+      }
+    }
+    bgImagesValue = paths.join(',');
+  }
+
   // 18.6：头像不再用整张卡 base64 存 SharedPreferences（会导致启动 OOM 白屏）。
   // PNG 载体像素即头像，直接写本地文件，存路径；JSON 卡无图则用 refImage 或空。
   String avatarPath = refImagePath;
-  if (result.files.single.extension == 'png') {
+  if (isPng) {
     try {
       avatarPath = await _writeLocalMediaFile(
           "avatar_${DateTime.now().millisecondsSinceEpoch}.png", fileBytes);
@@ -1198,8 +1192,7 @@ Future<String?> loadCharacterCard(context) async {
   }
 
   if (name.isEmpty) {
-    snackBarAlert(context, "角色卡缺少名称。");
-    return null;
+    throw Exception("角色卡缺少名称。");
   }
 
   // 18.2：入池，不覆写当前工作态
@@ -1212,7 +1205,7 @@ Future<String?> loadCharacterCard(context) async {
     voiceId: voiceId,
     refImage: refImagePath,
     voiceRefUrl: voiceRefUrl,
-    bgImages: refImagePath,
+    bgImages: bgImagesValue.isNotEmpty ? bgImagesValue : refImagePath,
     personality: personality,
     voiceModel: voiceModel,
     voiceUrl: voiceUrl,
@@ -1221,109 +1214,142 @@ Future<String?> loadCharacterCard(context) async {
     chatBackground: refImagePath,
   );
 
-  return newKey;
+  return CharacterImportResult(
+    studentKey: newKey,
+    name: name,
+    voiceUrl: voiceUrl,
+    voicePrompt: voicePrompt,
+    appearancePrompt: appearancePrompt,
+    warnings: warnings,
+  );
 }
 
-Future<void> downloadCharacterCard(context) async {
-  try {
-    // 1. 收集角色数据
-    final name = await getStudentName();
-    final description = await getPrompt();
-    final firstMes = await getOriginalMsg();
-    final drawCharPrompt = await getDrawCharPrompt();
-    final voiceRefUrl = await getVoiceRefUrl();
-    final refImage = await getRefImage();
+/// 18.2 / 18.6 / 19.8：导入角色卡（Web 专用 file_picker 壳）
+/// 19.7：App 内已移除手动导入入口，统一走局域网网页；Web 构建保留此旧路径仅保证可运行。
+/// 返回新入池记录的 student key（供 main.dart 后续 enrollment 写 voice_id/refImage）
+Future<String?> loadCharacterCard(context) async {
+  // 1. 让用户选择一个 PNG 或 JSON 文件
+  FilePickerResult? result = await FilePicker.platform.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: ['png', 'json'],
+    withData: true,
+  );
 
-    // 2. 一律完整模式导出（14.10：移除精简模式，避免用户困惑）
-    // 15.12：完整模式 = 本地文件读取字节并 base64 内嵌（OSS 已移除）
-    // 16.10：voice_id 账号隔离不再导出；声音改由 voice_url/voice_prompt 携带，不内嵌声纹 base64
-    String refImageData = "";
-    if (refImage.isNotEmpty) {
-      try {
-        // 18.5：参考图压缩（最长边 1024）后再 base64，避免单卡膨胀到数十 MB
-        final compressed = _compressImageForCard(await _readLocalMediaBytes(refImage));
-        refImageData = base64Encode(compressed);
-      } catch (e) {
-        debugPrint("fetch ref_image failed: $e");
-        snackBarAlert(context, "参考图读取失败，卡片将不含图片数据");
-      }
-    }
-
-    final characterData = {
-      "spec": "chara_card_v2",
-      "spec_version": "2.0",
-      "data": {
-        "name": name,
-        "description": description,
-        "first_mes": firstMes,
-        "extensions": {
-          "draw_prompt": drawCharPrompt,
-          // 16.10：声音来源（复刻 URL / 设计描述，二选一；voice_id 账号隔离不导出）
-          "voice_url": await getVoiceUrl(),
-          "voice_prompt": await getVoicePrompt(),
-          "appearance_prompt": await getAppearancePrompt(),
-          // 15.16.1：导出注册时模型名，导入即免配置
-          "voice_model": await getVoiceModel(),
-          // 15.17：角色性格条目（JSON 数组字符串）
-          "personality": await getPersonalityRaw(),
-          "voice_ref_url": voiceRefUrl,
-          "ref_image_url": refImage,
-          if (refImageData.isNotEmpty) "ref_image_data": refImageData,
-        }
-      }
-    };
-
-    // 4. 将角色数据转换为 Base64 编码的 JSON 字符串
-    final jsonString = jsonEncode(characterData);
-    final base64String = base64Encode(utf8.encode(jsonString));
-
-    // 5. 获取并解码头像图片
-    String avatarUri = await getAvatar();
-    Uint8List imageBytes;
-
-    if (avatarUri.startsWith('data:image')) {
-      imageBytes = base64Decode(avatarUri.split(',')[1]);
-    } else if (avatarUri.startsWith('http://') ||
-        avatarUri.startsWith('https://')) {
-      imageBytes = await _fetchBytes(Uri.parse(avatarUri));
-    } else if (avatarUri.startsWith('assets/')) {
-      // 内置 asset（如默认头像）
-      final byteData = await rootBundle.load(avatarUri);
-      imageBytes = byteData.buffer.asUint8List();
-    } else {
-      // 本地文件路径（ref_images/... 角色头像）
-      imageBytes = await File(avatarUri).readAsBytes();
-    }
-
-    final decoded = img.decodeImage(imageBytes);
-    if (decoded == null) {
-      snackBarAlert(context, "无法解码头像图片。");
-      return;
-    }
-
-    // 18.5：头像（PNG 载体）压缩（最长边 1024），避免载体本身过大
-    img.Image cardImage = decoded;
-    final longest = cardImage.width > cardImage.height
-        ? cardImage.width
-        : cardImage.height;
-    if (longest > 1024) {
-      cardImage = cardImage.width >= cardImage.height
-          ? img.copyResize(cardImage, width: 1024)
-          : img.copyResize(cardImage, height: 1024);
-    }
-
-    // 6. 将 Base64 字符串作为 'chara' 元数据添加到图片中
-    cardImage.textData = {'chara': base64String};
-
-    // 7. 将图片编码回 PNG 格式
-    final Uint8List outputBytes = Uint8List.fromList(img.encodePng(cardImage));
-
-    // 8. 提示用户保存文件 (区分 Web 和其他平台)
-    await writePngFile(outputBytes);
-  } catch (e) {
-    debugPrint("${I18n.t('download_card_error')}$e");
-    snackBarAlert(context, "${I18n.t('download_card_error')}$e");
+  if (result == null || result.files.single.bytes == null) {
+    snackBarAlert(context, "未选择文件。");
+    return null;
   }
+
+  try {
+    final r = await importCharacterCardBytes(
+        result.files.single.bytes!, result.files.single.name,
+        context: context);
+    return r.studentKey;
+  } catch (e) {
+    snackBarAlert(context, "$e");
+    return null;
+  }
+}
+
+/// 25.3：从角色字段构造 SillyTavern V2 PNG 角色卡字节（本地导出 / 网页导出共用，
+/// 单点维护）。avatarUri 兼容 data URI / http(s) / assets/ / 本地文件路径。
+/// 图片读取失败仅 debugPrint 跳过（无 context，不弹提示）。
+Future<Uint8List> buildCharacterCardBytes({
+  required String name,
+  required String description,
+  required String firstMes,
+  required String drawCharPrompt,
+  String voiceRefUrl = "",
+  String refImage = "",
+  List<String> bgImages = const [],
+  String personality = "",
+  String voiceModel = "",
+  String voiceUrl = "",
+  String voicePrompt = "",
+  String appearancePrompt = "",
+  required String avatarUri,
+}) async {
+  // 参考图压缩（最长边 1024，18.5）后 base64 内嵌
+  String refImageData = "";
+  if (refImage.isNotEmpty) {
+    try {
+      refImageData =
+          base64Encode(_compressImageForCard(await _readLocalMediaBytes(refImage)));
+    } catch (e) {
+      debugPrint("fetch ref_image failed: $e");
+    }
+  }
+  // 25.2：背景图逐张压缩内嵌
+  final bgImagesData = <String>[];
+  for (final bg in bgImages) {
+    if (bg.isEmpty) continue;
+    try {
+      bgImagesData
+          .add(base64Encode(_compressImageForCard(await _readLocalMediaBytes(bg))));
+    } catch (e) {
+      debugPrint("fetch bg_image failed: $e");
+    }
+  }
+
+  final characterData = {
+    "spec": "chara_card_v2",
+    "spec_version": "2.0",
+    "data": {
+      "name": name,
+      "description": description,
+      "first_mes": firstMes,
+      "extensions": {
+        "draw_prompt": drawCharPrompt,
+        // 16.10：声音来源（复刻 URL / 设计描述，二选一；voice_id 账号隔离不导出）
+        "voice_url": voiceUrl,
+        "voice_prompt": voicePrompt,
+        "appearance_prompt": appearancePrompt,
+        // 15.16.1：导出注册时模型名，导入即免配置
+        "voice_model": voiceModel,
+        // 15.17：角色性格条目（JSON 数组字符串）
+        "personality": personality,
+        "voice_ref_url": voiceRefUrl,
+        "ref_image_url": refImage,
+        if (refImageData.isNotEmpty) "ref_image_data": refImageData,
+        if (bgImagesData.isNotEmpty) "bg_images_data": bgImagesData,
+      }
+    }
+  };
+
+  final base64String =
+      base64Encode(utf8.encode(jsonEncode(characterData)));
+
+  // 头像（PNG 载体）：data URI / http(s) / assets / 本地路径四类取值
+  Uint8List imageBytes;
+  if (avatarUri.startsWith('data:image')) {
+    imageBytes = base64Decode(avatarUri.split(',')[1]);
+  } else if (avatarUri.startsWith('http://') || avatarUri.startsWith('https://')) {
+    imageBytes = await _fetchBytes(Uri.parse(avatarUri));
+  } else if (avatarUri.startsWith('assets/')) {
+    final byteData = await rootBundle.load(avatarUri);
+    imageBytes = byteData.buffer.asUint8List();
+  } else {
+    imageBytes = await File(avatarUri).readAsBytes();
+  }
+
+  final decoded = img.decodeImage(imageBytes);
+  if (decoded == null) {
+    throw Exception("无法解码头像图片。");
+  }
+
+  // 18.5：头像（PNG 载体）压缩（最长边 1024），避免载体本身过大
+  img.Image cardImage = decoded;
+  final longest = cardImage.width > cardImage.height
+      ? cardImage.width
+      : cardImage.height;
+  if (longest > 1024) {
+    cardImage = cardImage.width >= cardImage.height
+        ? img.copyResize(cardImage, width: 1024)
+        : img.copyResize(cardImage, height: 1024);
+  }
+
+  cardImage.textData = {'chara': base64String};
+  return Uint8List.fromList(img.encodePng(cardImage));
 }
 
 /// 拉取 URL 字节（Web 用 http 包，其他平台用 HttpClient）

@@ -1,11 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:aidazi/openai.dart' as openai;
 import 'package:aidazi/utils.dart';
 
 void main() {
+  setUpAll(() {
+    // 19.3：LLM 密钥改读独立槽位 key_llm_{name}（flutter_secure_storage）
+    FlutterSecureStorage.setMockInitialValues({'key_llm_test': 'test-key'});
+  });
+
   test('parallel completions keep their SSE streams isolated', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final requests = <Future<void>>[];

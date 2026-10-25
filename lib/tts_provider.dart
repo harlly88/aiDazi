@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'image_provider.dart';
+import 'secure_key_store.dart';
 import 'storage.dart';
 
 /// 百炼 CosyVoice 系统预置音色（cosyvoice-v3-flash 可直接合成，无需注册声纹）
@@ -36,7 +37,7 @@ SystemVoice? findSystemVoice(String id) {
 ///
 /// - 语音合成：POST /api/v1/services/audio/tts/SpeechSynthesizer
 ///   非流式，返回 output.audio.url（24 小时有效）
-/// - 鉴权：Bearer API Key（与千问对话共用 getAliyunApiKey）
+/// - 鉴权：Bearer API Key（19.3 起读独立槽位 key_tts，与文字/图像/视频互不回落）
 /// - 16.10/16.12：音色创建（voice-enrollment）统一走 customization 端点：
 ///   声音复刻（公网声音文件 URL）或 声音设计（voice_prompt 文字描述），返回 voice_id
 /// - 15.16.1：合成模型名可传入（角色级 voice_model > 全局 tts_model > 默认值）
@@ -50,7 +51,7 @@ class BailianTtsClient {
 
   BailianTtsClient({
     required this.apiKey,
-    this.baseUrl = 'https://dashscope.aliyuncs.com',
+    this.baseUrl = defaultTtsBaseUrl,
     http.Client? httpClient,
   })  : _httpClient = httpClient ?? http.Client(),
         assert(apiKey.isNotEmpty, 'API key cannot be empty');
@@ -249,6 +250,8 @@ class BailianTtsClient {
 ///
 /// 百炼生成的图片 URL 24 小时过期，落地为本地文件后由 saveRefImage 持久化
 Future<String> _downloadRefImage(String url) async {
+  // 第十六章：OpenAI 协议 b64 兜底产物已是本地路径，直通不再发起 http
+  if (!url.startsWith('http')) return url;
   final response = await http
       .get(Uri.parse(url))
       .timeout(const Duration(minutes: 5));
@@ -281,9 +284,10 @@ Future<({String? voiceId, String? refImagePath})> enrollImportedCharacter({
   String? appearancePrompt,
   required String roleName,
 }) async {
-  final apiKey = await getAliyunApiKey();
+  // 19.3：语音能力改读独立槽位 key_tts（互不回落）
+  final apiKey = await getTtsApiKey();
   if (apiKey == null || apiKey.isEmpty) {
-    throw Exception('未配置阿里云百炼 API Key，请先在 设置 → 模型配置 中配置');
+    throw Exception(keyNotSetError('语音'));
   }
   final targetModel = await getTtsModel();
 
@@ -291,7 +295,9 @@ Future<({String? voiceId, String? refImagePath})> enrollImportedCharacter({
   final hasUrl = voiceUrl != null && voiceUrl.isNotEmpty;
   final hasPrompt = voicePrompt != null && voicePrompt.isNotEmpty;
   if (hasUrl || hasPrompt) {
-    final client = BailianTtsClient(apiKey: apiKey);
+    // 第二十章：接口地址可独立配置（空 = 官方默认）
+    final client =
+        BailianTtsClient(apiKey: apiKey, baseUrl: await getTtsBaseUrl());
     voiceId = await client.createVoice(
       voiceUrl: hasUrl ? voiceUrl : null,
       voicePrompt: hasUrl ? null : voicePrompt,

@@ -1,39 +1,144 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show FilteringTextInputFormatter;
-import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'storage.dart';
 import 'i18n.dart';
 import 'app_theme.dart' show primaryBlue;
+import 'secure_key_store.dart';
+import 'lan_config_page.dart';
 import 'tts_provider.dart' show systemVoices;
-import 'voice_input.dart';
-import 'environment_provider.dart' show getEnvironmentInjection;
 
 import 'utils.dart'
-    show snackBarAlert, Config, DecimalTextInputFormatter, buildTimeInjection;
+    show snackBarAlert, Config, DecimalTextInputFormatter;
 
-/// 17.15：Provider → API Key 申请链接映射
-const Map<String, Map<String, String>> _apiKeyApplyLinks = {
-  'qwen':     {'name': '阿里云百炼', 'url': 'https://bailian.console.aliyun.com/?tab=model#/api-key'},
-  'deepseek': {'name': 'DeepSeek',   'url': 'https://platform.deepseek.com/api_keys'},
-  'doubao':   {'name': '火山引擎',    'url': 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey'},
-  'glm':      {'name': '智谱 AI',    'url': 'https://open.bigmodel.cn/usercenter/apikeys'},
-  'kimi':     {'name': 'Moonshot',   'url': 'https://platform.moonshot.cn/console/api-keys'},
-};
+/// 19.7：密钥配置卡片（置顶）——四行槽位掩码 + 「网页配置」入口
+///
+/// 四项能力密钥独立（文字 / 语音 / 图像 / 视频），App 内不再提供手动输入；
+/// 掩码永不回显明文（19.9）。Web 构建隐藏本卡片，保留旧手动输入路径。
+class _KeyStatusCard extends StatefulWidget {
+  const _KeyStatusCard();
 
-/// 预置 LLM 模板（与 agent.md 第三章 3.1 一致；预设项不可删除，缺失时自动补齐）
-final List<Config> _presetConfigs = [
-  Config(name: "qwen", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiKey: "", model: "qwen3.7-flash", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-  Config(name: "deepseek", baseUrl: "https://api.deepseek.com/v1", apiKey: "", model: "deepseek-chat", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-  Config(name: "doubao", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", apiKey: "", model: "doubao-seed-1-6", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-  Config(name: "glm", baseUrl: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", model: "glm-4.6", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-  Config(name: "kimi", baseUrl: "https://api.moonshot.cn/v1", apiKey: "", model: "kimi-k2-turbo-preview", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-  Config(name: "custom", baseUrl: "", apiKey: "", model: "", temperature: "1", frequencyPenalty: "", presencePenalty: "", maxTokens: "8192"),
-];
+  @override
+  State<_KeyStatusCard> createState() => _KeyStatusCardState();
+}
+
+class _KeyStatusCardState extends State<_KeyStatusCard> {
+  String _llmMask = '';
+  String _ttsMask = '';
+  String _imageMask = '';
+  String _videoMask = '';
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final configs = await getApiConfigs();
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('current_api') ?? '';
+    final current = (raw.startsWith('api_') && raw.length > 4)
+        ? raw.substring(4)
+        : (configs.isNotEmpty ? configs.first.name : '');
+    final llmMask = maskKey(await getLlmApiKeyByName(current));
+    final ttsMask = maskKey(await getTtsApiKey());
+    final imageMask = maskKey(await getImageApiKey());
+    final videoMask = maskKey(await getVideoApiKey());
+    if (!mounted) return;
+    setState(() {
+      _llmMask = llmMask;
+      _ttsMask = ttsMask;
+      _imageMask = imageMask;
+      _videoMask = videoMask;
+      _loaded = true;
+    });
+  }
+
+  Widget _slotRow(String label, String mask, {String? leading}) => ListTile(
+        dense: true,
+        visualDensity: VisualDensity.compact,
+        leading: leading != null
+            ? Text(leading,
+                style: const TextStyle(fontSize: 12, color: Colors.grey))
+            : null,
+        title: Text(label, style: const TextStyle(fontSize: 14)),
+        trailing: Text(
+          mask,
+          style: TextStyle(
+            fontSize: 13,
+            color: mask == '未配置' ? Colors.redAccent : Colors.grey[700],
+          ),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: primaryBlue.withValues(alpha: 0.06),
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(I18n.t('key_config_title'),
+                  style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: primaryBlue)),
+            ),
+            Text(I18n.t('key_config_hint'),
+                style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+            // 26.1-1：文字行不再显示厂商后缀（provider 已退化为内部标签）
+            _slotRow(I18n.t('key_slot_llm'), _loaded ? _llmMask : '…',
+                leading: '①'),
+            _slotRow(I18n.t('key_slot_tts'), _loaded ? _ttsMask : '…',
+                leading: '②'),
+            _slotRow(I18n.t('key_slot_image'), _loaded ? _imageMask : '…',
+                leading: '③'),
+            _slotRow(I18n.t('key_slot_video'), _loaded ? _videoMask : '…',
+                leading: '④'),
+            const SizedBox(height: 4),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: primaryBlue,
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.devices, size: 18),
+                label: Text(I18n.t('lan_config_title')),
+                onPressed: () async {
+                  await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const LanConfigPage()));
+                  // 返回后刷新掩码（网页端可能已保存/切换 provider）
+                  await _load();
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 17.15 的 API Key 申请链接映射已于第二十六章删除（密钥申请自行去官网）。
+
+/// 预置 LLM 模板已移至 storage.dart 公开为 presetConfigs（第二十二章：设置页与
+/// 局域网配置服务共用，网页保存回落预置创建，修复 LLM 地址/模型名不落盘问题）
 
 bool _isPresetName(String name) =>
-    _presetConfigs.any((c) => c.name == name);
+    presetConfigs.any((c) => c.name == name);
 
 class ConfigPage extends StatefulWidget {
   final Function(Config) updateFunc;
@@ -62,14 +167,16 @@ class ConfigPageState extends State<ConfigPage>
   // TTS 兜底音色
   String _fallbackVoice = 'longanhuan_v3';
 
-  // 15.16：TTS / ASR / 生图 / 生视频模型名全部可编辑（官方可能下线/升级模型）
+  // 15.16：TTS / 生图 / 生视频模型名全部可编辑（官方可能下线/升级模型）
+  // （19.2：ASR 已整体移除，语音输入回归系统输入法）
   final _ttsModelController = TextEditingController();
-  final _asrModelController = TextEditingController();
   final _wanImageModelController = TextEditingController();
   final _wanVideoModelController = TextEditingController();
 
-  // 16.3：ASR 测试进行中（录 3 秒 → 识别 → 展示结果）
-  bool _asrTesting = false;
+  // 第二十章：TTS / 生图 / 生视频接口地址独立可编辑（空 = 官方默认）
+  final _ttsUrlController = TextEditingController();
+  final _imageUrlController = TextEditingController();
+  final _videoUrlController = TextEditingController();
 
   // 万相文生图
   String _wanImageSize = '1080*1920';
@@ -87,7 +194,7 @@ class ConfigPageState extends State<ConfigPage>
       debugPrint("Loaded API configs: $value");
       // 14.4 预设自动补齐：无论列表是否为空，按 name 判重补齐缺失的预置项
       final existingNames = value.map((c) => c.name).toSet();
-      for (final preset in _presetConfigs) {
+      for (final preset in presetConfigs) {
         if (!existingNames.contains(preset.name)) {
           value.add(preset);
         }
@@ -124,9 +231,6 @@ class ConfigPageState extends State<ConfigPage>
     getTtsModel().then((v) {
       if (mounted) _ttsModelController.text = v;
     });
-    getAsrModel().then((v) {
-      if (mounted) _asrModelController.text = v;
-    });
     getWanImageConfig().then((config) {
       if (mounted) {
         setState(() {
@@ -147,6 +251,16 @@ class ConfigPageState extends State<ConfigPage>
         });
       }
     });
+    // 第二十章：接口地址独立配置（getter 已回落默认，输入框显示生效值）
+    getTtsBaseUrl().then((v) {
+      if (mounted) _ttsUrlController.text = v;
+    });
+    getImageBaseUrl().then((v) {
+      if (mounted) _imageUrlController.text = v;
+    });
+    getVideoBaseUrl().then((v) {
+      if (mounted) _videoUrlController.text = v;
+    });
   }
 
   @override
@@ -161,9 +275,11 @@ class ConfigPageState extends State<ConfigPage>
     presencePenaltyController.dispose();
     maxTokensController.dispose();
     _ttsModelController.dispose();
-    _asrModelController.dispose();
     _wanImageModelController.dispose();
     _wanVideoModelController.dispose();
+    _ttsUrlController.dispose();
+    _imageUrlController.dispose();
+    _videoUrlController.dispose();
     super.dispose();
   }
 
@@ -258,97 +374,7 @@ class ConfigPageState extends State<ConfigPage>
     snackBarAlert(context, I18n.t('save_success'));
   }
 
-  /// 16.3：ASR 一键测试——录 3 秒 → 自动停止 → 调百炼识别 → 展示结果
-  /// （不进对话流程；失败时 SnackBar 显示具体错误，便于定位 Key/网络/格式问题）
-  Future<void> _runAsrTest() async {
-    if (_asrTesting) return;
-    setState(() => _asrTesting = true);
-    final controller = VoiceInputController();
-    try {
-      await controller.start();
-      if (!mounted) return;
-      snackBarAlert(context, I18n.t('asr_test_start'));
-      await Future<void>.delayed(const Duration(seconds: 3));
-      final text = await controller.stopAndTranscribe();
-      if (!mounted) return;
-      if (text == null || text.isEmpty) {
-        snackBarAlert(
-            context, "${I18n.t('asr_test_fail')}: ${I18n.t('recognition_failed')}");
-        return;
-      }
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text(I18n.t('asr_test_ok')),
-          content: Text(text),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: Text(I18n.t('confirm')),
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      await controller.cancel();
-      if (mounted) snackBarAlert(context, "${I18n.t('asr_test_fail')}: $e");
-    } finally {
-      await controller.dispose();
-      if (mounted) setState(() => _asrTesting = false);
-    }
-  }
-
-  /// 16.4：环境信息预览——时间注入（实时生成）+ 定位/天气注入（异步加载）
-  Future<void> _showEnvPreview() async {
-    final timeText = buildTimeInjection();
-    final envFuture = getEnvironmentInjection();
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(I18n.t('env_preview')),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                I18n.t('env_preview_hint'),
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 12),
-              Text(timeText),
-              const SizedBox(height: 8),
-              FutureBuilder<String>(
-                future: envFuture,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-                  final env = snapshot.data ?? '';
-                  return Text(
-                    env.isEmpty ? I18n.t('env_preview_empty') : env,
-                    style: TextStyle(
-                        fontSize: 13,
-                        color: env.isEmpty ? Colors.grey[600] : null),
-                  );
-                },
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: Text(I18n.t('confirm')),
-          ),
-        ],
-      ),
-    );
-  }
+  // 26.1-6：环境信息预览按钮与 _showEnvPreview 已删除（位置/天气功能同轮下线）
 
   @override
   Widget build(BuildContext context) {
@@ -366,60 +392,67 @@ class ConfigPageState extends State<ConfigPage>
             Tab(text: I18n.t('video_model')),
           ],
         ),
+        // 第二十三章：io 平台三要素统一走网页配置，无字段可保存，AppBar 按钮
+        // 仅 Web 保留（旧手动路径）；下拉切换厂商已即时生效（updateFunc + setCurrentApiConfig）
         actions: [
-          // 初始化
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () {
-              setState(() {
-                nameController.clear();
-                urlController.clear();
-                keyController.clear();
-                modelController.clear();
-                temperatureController.clear();
-                frequencyPenaltyController.clear();
-                presencePenaltyController.clear();
-                maxTokensController.clear();
-              });
-            },
-          ),
-          // 保存（当前 LLM 配置）
-          IconButton(
-            icon: const Icon(Icons.save),
-            onPressed: () async {
-              saveConfig();
-              // 18.1：保存按钮同步持久化 4 个模型名（输入框仅 onSubmitted 保存，
-              // 移动端直接点保存会丢失；空值回落各自默认值）
-              final tts = _ttsModelController.text.trim();
-              final asr = _asrModelController.text.trim();
-              final wanImage = _wanImageModelController.text.trim();
-              final wanVideo = _wanVideoModelController.text.trim();
-              await setTtsModel(tts.isEmpty ? 'cosyvoice-v3-flash' : tts);
-              await setAsrModel(asr.isEmpty ? 'qwen3-asr-flash' : asr);
-              await setWanImageConfig(
-                  wanImage.isEmpty ? 'wan2.7-image' : wanImage, _wanImageSize);
-              await setVideoModel(wanVideo.isEmpty ? 'wan2.7-t2v' : wanVideo);
-              widget.updateFunc(Config(
-                name: nameController.text,
-                baseUrl: urlController.text,
-                apiKey: keyController.text,
-                model: modelController.text,
-                temperature: temperatureController.text.isEmpty
-                    ? null
-                    : temperatureController.text,
-                frequencyPenalty: frequencyPenaltyController.text.isEmpty
-                    ? null
-                    : frequencyPenaltyController.text,
-                presencePenalty: presencePenaltyController.text.isEmpty
-                    ? null
-                    : presencePenaltyController.text,
-                maxTokens: maxTokensController.text.isEmpty
-                    ? null
-                    : maxTokensController.text,
-              ));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
+          if (kIsWeb) ...[
+            // 初始化
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: () {
+                setState(() {
+                  nameController.clear();
+                  urlController.clear();
+                  keyController.clear();
+                  modelController.clear();
+                  temperatureController.clear();
+                  frequencyPenaltyController.clear();
+                  presencePenaltyController.clear();
+                  maxTokensController.clear();
+                });
+              },
+            ),
+            // 保存（当前 LLM 配置，Web 旧路径）
+            IconButton(
+              icon: const Icon(Icons.save),
+              onPressed: () async {
+                saveConfig();
+                // 18.1：保存按钮同步持久化模型名（输入框仅 onSubmitted 保存，
+                // 移动端直接点保存会丢失；空值回落各自默认值；19.2 ASR 已移除）
+                final tts = _ttsModelController.text.trim();
+                final wanImage = _wanImageModelController.text.trim();
+                final wanVideo = _wanVideoModelController.text.trim();
+                await setTtsModel(tts.isEmpty ? 'cosyvoice-v3-flash' : tts);
+                await setWanImageConfig(
+                    wanImage.isEmpty ? 'wan2.7-image' : wanImage, _wanImageSize);
+                await setVideoModel(
+                    wanVideo.isEmpty ? 'wan3.0-video-prime' : wanVideo);
+                // 第二十章：接口地址同步持久化（空 = 恢复官方默认）
+                await setTtsBaseUrl(_ttsUrlController.text.trim());
+                await setImageBaseUrl(_imageUrlController.text.trim());
+                await setVideoBaseUrl(_videoUrlController.text.trim());
+                widget.updateFunc(Config(
+                  name: nameController.text,
+                  baseUrl: urlController.text,
+                  apiKey: keyController.text,
+                  model: modelController.text,
+                  temperature: temperatureController.text.isEmpty
+                      ? null
+                      : temperatureController.text,
+                  frequencyPenalty: frequencyPenaltyController.text.isEmpty
+                      ? null
+                      : frequencyPenaltyController.text,
+                  presencePenalty: presencePenaltyController.text.isEmpty
+                      ? null
+                      : presencePenaltyController.text,
+                  maxTokens: maxTokensController.text.isEmpty
+                      ? null
+                      : maxTokensController.text,
+                ));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+          ],
         ],
       ),
       body: TabBarView(
@@ -441,6 +474,11 @@ class ConfigPageState extends State<ConfigPage>
       child: SingleChildScrollView(
         child: Column(
           children: [
+            // 19.7：密钥配置卡片置顶（Web 隐藏，保留旧手动输入路径）
+            if (!kIsWeb) const _KeyStatusCard(),
+            // 第二十四章：预设管理（厂商下拉切换）仅 Web 保留——io 三要素统一网页
+            // 配置，直接改地址/密钥/模型名即可指向任意服务，厂商切换无必要
+            if (kIsWeb) ...[
             ListTile(
               title: Text(I18n.t('preset_manage'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
             ),
@@ -469,7 +507,8 @@ class ConfigPageState extends State<ConfigPage>
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 6, vertical: 1),
                                       decoration: BoxDecoration(
-                                        color: primaryBlue.withOpacity(0.15),
+                                        color: primaryBlue
+                                            .withValues(alpha: 0.15),
                                         borderRadius: BorderRadius.circular(4),
                                       ),
                                       child: const Text(
@@ -521,7 +560,10 @@ class ConfigPageState extends State<ConfigPage>
                 ],
               ),
             ),
+            ],
             const SizedBox(height: 20),
+            // 第二十三章：配置参数块仅 Web 保留（io 三要素统一走网页配置，清除重复输入）
+            if (kIsWeb) ...[
             ListTile(
               title: Text(I18n.t('config_params'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
             ),
@@ -539,55 +581,32 @@ class ConfigPageState extends State<ConfigPage>
                     decoration: InputDecoration(labelText: I18n.t('api_url')),
                   ),
                   const SizedBox(height: 10),
-                  TextField(
-                    controller: keyController,
-                    decoration: InputDecoration(labelText: I18n.t('api_key')),
-                  ),
-                  ValueListenableBuilder<TextEditingValue>(
-                    valueListenable: keyController,
-                    builder: (context, value, _) {
-                      final isAliyun =
-                          urlController.text.contains('dashscope.aliyuncs.com');
-                      if (!isAliyun) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(
-                          '提示：此为阿里云百炼 API Key，语音、识别、文生图、文生视频将复用同一个 Key',
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.grey[600]),
-                        ),
-                      );
-                    },
-                  ),
+                  // 19.7：io 平台已移除手动 Key 输入（统一走网页配置）；
+                  // Web 构建保留旧输入路径（仅保证可编译可运行）
+                  if (kIsWeb) ...[
+                    TextField(
+                      controller: keyController,
+                      decoration:
+                          InputDecoration(labelText: I18n.t('api_key')),
+                    ),
+                    ValueListenableBuilder<TextEditingValue>(
+                      valueListenable: keyController,
+                      builder: (context, value, _) {
+                        final isAliyun = urlController.text
+                            .contains('dashscope.aliyuncs.com');
+                        if (!isAliyun) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            '提示：此为阿里云百炼 API Key',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[600]),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                   const SizedBox(height: 6),
-                  // 17.15：API Key 申请链接按钮（根据 Provider 动态显示）
-                  ValueListenableBuilder<TextEditingValue>(
-                    valueListenable: nameController,
-                    builder: (context, value, _) {
-                      final applyInfo = _apiKeyApplyLinks[value.text.trim()];
-                      if (applyInfo == null) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: OutlinedButton.icon(
-                          onPressed: () async {
-                            final url = Uri.parse(applyInfo['url']!);
-                            if (await canLaunchUrl(url)) {
-                              await launchUrl(
-                                url,
-                                mode: LaunchMode.externalApplication,
-                              );
-                            } else {
-                              if (context.mounted) {
-                                snackBarAlert(context, '无法打开浏览器');
-                              }
-                            }
-                          },
-                          icon: const Icon(Icons.key, size: 18),
-                          label: Text('申请 ${applyInfo['name']} API Key'),
-                        ),
-                      );
-                    },
-                  ),
                   const SizedBox(height: 10),
                   TextField(
                     controller: modelController,
@@ -652,23 +671,17 @@ class ConfigPageState extends State<ConfigPage>
                       }
                     },
                   ),
-                  const SizedBox(height: 10),
-                  // 16.4：环境信息预览（时间/位置/天气注入文本）
-                  OutlinedButton.icon(
-                    onPressed: _showEnvPreview,
-                    icon: const Icon(Icons.info_outline),
-                    label: Text(I18n.t('env_preview')),
-                  ),
                 ],
               ),
             ),
+            ],
           ],
         ),
       ),
     );
   }
 
-  // ==================== 语音（TTS / ASR） ====================
+  // ==================== 语音（TTS） ====================
   Widget _buildVoiceTab() {
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -690,18 +703,36 @@ class ConfigPageState extends State<ConfigPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 15.16：TTS 模型名可编辑（默认 cosyvoice-v3-flash）
-              TextField(
-                controller: _ttsModelController,
-                decoration: InputDecoration(
-                  labelText: I18n.t('tts_model_name'),
-                  hintText: 'cosyvoice-v3-flash',
-                  border: const OutlineInputBorder(),
+              // 第二十三章：TTS 模型名 / 接口地址仅 Web 保留（io 统一走网页配置）
+              if (kIsWeb) ...[
+                // 15.16：TTS 模型名可编辑（默认 cosyvoice-v3-flash）
+                TextField(
+                  controller: _ttsModelController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('tts_model_name'),
+                    hintText: 'cosyvoice-v3-flash',
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) =>
+                      _saveModelName(setTtsModel, v.isEmpty ? 'cosyvoice-v3-flash' : v),
                 ),
-                onSubmitted: (v) =>
-                    _saveModelName(setTtsModel, v.isEmpty ? 'cosyvoice-v3-flash' : v),
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 8),
+                // 第二十章：TTS 接口地址独立可编辑（空 = 官方默认）
+                TextField(
+                  controller: _ttsUrlController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('base_url_label'),
+                    hintText: defaultTtsBaseUrl,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) =>
+                      _saveModelName(setTtsBaseUrl, v.trim()),
+                ),
+                const SizedBox(height: 4),
+                Text(I18n.t('base_url_hint'),
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+                const SizedBox(height: 12),
+              ],
               Text(I18n.t('tts_fallback_voice'),
                   style: const TextStyle(fontSize: 14)),
               const SizedBox(height: 4),
@@ -725,49 +756,6 @@ class ConfigPageState extends State<ConfigPage>
               Text(
                 I18n.t('tts_fallback_voice_hint'),
                 style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-            ],
-          ),
-        ),
-        const Divider(),
-        ListTile(
-          title: Text(I18n.t('asr_config'),
-              style: const TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey)),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 15.16：ASR 模型名可编辑（默认 qwen3-asr-flash；sensevoice 已下线）
-              TextField(
-                controller: _asrModelController,
-                decoration: InputDecoration(
-                  labelText: I18n.t('asr_model_name'),
-                  hintText: 'qwen3-asr-flash',
-                  border: const OutlineInputBorder(),
-                ),
-                onSubmitted: (v) =>
-                    _saveModelName(setAsrModel, v.isEmpty ? 'qwen3-asr-flash' : v),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                I18n.t('asr_config_hint'),
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 12),
-              // 16.3：ASR 一键测试（录 3 秒 → 识别 → 显示结果，不进对话流程）
-              ElevatedButton.icon(
-                onPressed: _asrTesting ? null : _runAsrTest,
-                icon: _asrTesting
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.mic),
-                label: Text(I18n.t('asr_test')),
               ),
             ],
           ),
@@ -798,24 +786,38 @@ class ConfigPageState extends State<ConfigPage>
           child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-              // 15.16：生图模型名可编辑（默认 wan2.7-image；官方下线/升级可自行更换）
-              TextField(
-                controller: _wanImageModelController,
-                decoration: InputDecoration(
-                  labelText: I18n.t('model'),
-                  hintText: 'wan2.7-image',
-                  border: const OutlineInputBorder(),
+              // 第二十三章：生图模型名 / 接口地址仅 Web 保留（io 统一走网页配置）
+              if (kIsWeb) ...[
+                // 15.16：生图模型名可编辑（默认 wan2.7-image；官方下线/升级可自行更换）
+                TextField(
+                  controller: _wanImageModelController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('model'),
+                    hintText: 'wan2.7-image',
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) => _saveModelName(
+                      (m) => setWanImageConfig(m, _wanImageSize),
+                      v.isEmpty ? 'wan2.7-image' : v),
                 ),
-                onSubmitted: (v) => _saveModelName(
-                    (m) => setWanImageConfig(m, _wanImageSize),
-                    v.isEmpty ? 'wan2.7-image' : v),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                I18n.t('model_editable_hint'),
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 8),
+                // 第二十章：图像接口地址独立可编辑（空 = 官方默认）
+                TextField(
+                  controller: _imageUrlController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('base_url_label'),
+                    hintText: defaultImageBaseUrl,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) => _saveModelName(setImageBaseUrl, v.trim()),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  I18n.t('model_editable_hint'),
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 12),
+              ],
               Text(I18n.t('image_resolution'), style: const TextStyle(fontSize: 14)),
               const SizedBox(height: 4),
               // 15.6：统一 9:16 竖版档位（适配手机竖屏）
@@ -863,23 +865,37 @@ class ConfigPageState extends State<ConfigPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 15.16：生视频模型名可编辑（默认 wan2.7-t2v；图生视频自动切 i2v）
-              TextField(
-                controller: _wanVideoModelController,
-                decoration: InputDecoration(
-                  labelText: I18n.t('model'),
-                  hintText: 'wan2.7-t2v',
-                  border: const OutlineInputBorder(),
+              // 第二十三章：生视频模型名 / 接口地址仅 Web 保留（io 统一走网页配置）
+              if (kIsWeb) ...[
+                // 15.16：生视频模型名可编辑（默认 wan3.0-video-prime；旧 -t2v 命名图生自动切 i2v）
+                TextField(
+                  controller: _wanVideoModelController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('model'),
+                    hintText: 'wan3.0-video-prime',
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) => _saveModelName(
+                      setVideoModel, v.isEmpty ? 'wan3.0-video-prime' : v),
                 ),
-                onSubmitted: (v) => _saveModelName(
-                    setVideoModel, v.isEmpty ? 'wan2.7-t2v' : v),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                I18n.t('model_editable_hint'),
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 8),
+                // 第二十章：视频接口地址独立可编辑（空 = 官方默认）
+                TextField(
+                  controller: _videoUrlController,
+                  decoration: InputDecoration(
+                    labelText: I18n.t('base_url_label'),
+                    hintText: defaultVideoBaseUrl,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (v) => _saveModelName(setVideoBaseUrl, v.trim()),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  I18n.t('model_editable_hint'),
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 12),
+              ],
               Text(I18n.t('video_resolution'), style: const TextStyle(fontSize: 14)),
               const SizedBox(height: 4),
               DropdownButton<String>(

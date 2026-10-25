@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:eventflux/eventflux.dart';
+import 'secure_key_store.dart';
 import 'utils.dart' show Config;
 
 String removeTailSlash(String input) {
@@ -64,10 +65,16 @@ Future<void> completion(Config config, List<List<String>> message,
   }
 
   try {
+    // 19.3：LLM 密钥改读独立槽位 key_llm_{name}（io 加密存储；Web 回落 config.apiKey）
+    final apiKey = await getLlmApiKey(config);
+    if (apiKey == null || apiKey.isEmpty) {
+      safeErr(keyNotSetError('文字'));
+      return;
+    }
     eventFlux.connect(EventFluxConnectionType.post,
         "${removeTailSlash(config.baseUrl)}/chat/completions",
         header: {
-          'Authorization': 'Bearer ${config.apiKey}',
+          'Authorization': 'Bearer $apiKey',
           'Content-Type': 'application/json',
         },
         body: data,

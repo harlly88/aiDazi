@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:dio/dio.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'secure_key_store.dart';
 import 'storage.dart';
 import 'i18n.dart';
 import 'openai.dart';
@@ -337,9 +338,10 @@ class PromptEditorState extends State<PromptEditor> {
   /// 调百炼声音设计创建音色，返回 voice_id（编辑/新增角色共用）
   Future<String> _createVoiceByPrompt(
       String voicePrompt, String roleName, String targetModel) async {
-    final apiKey = await getAliyunApiKey();
+    // 19.3：音色注册（声音设计）改读独立槽位 key_tts
+    final apiKey = await getTtsApiKey();
     if (apiKey == null || apiKey.isEmpty) {
-      throw Exception('未配置阿里云百炼 API Key，请先在 设置 → 模型配置 中配置');
+      throw Exception(keyNotSetError('语音'));
     }
     final client = BailianTtsClient(apiKey: apiKey);
     return client.createVoice(
@@ -633,6 +635,8 @@ class PromptEditorState extends State<PromptEditor> {
 
   /// 下载万相生成的参考图到本地 ref_images 目录，返回本地路径
   Future<String> _downloadRefImage(String url) async {
+    // 第十六章：OpenAI 协议 b64 兜底产物已是本地路径，直通不再发起 http
+    if (!url.startsWith('http')) return url;
     final response = await http
         .get(Uri.parse(url))
         .timeout(const Duration(seconds: 60));

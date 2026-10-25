@@ -30,17 +30,3 @@ Future<bool> writeFile(String data) async {
   }
 }
 
-Future<bool> writePngFile(Uint8List data) async {
-  try {
-    final blob = html.Blob([data], 'image/png', 'native');
-    final url = html.Url.createObjectUrlFromBlob(blob);
-    final anchor = html.AnchorElement(href: url)
-      ..setAttribute('download', 'aiDaziCard_${getTimeStr(DateTime.now().millisecondsSinceEpoch)}.png')
-      ..click();
-    html.Url.revokeObjectUrl(url);
-    return true;
-  } catch (e) {
-    debugPrint('Error writing PNG file: $e');
-    return false;
-  }
-}

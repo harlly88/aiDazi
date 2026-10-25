@@ -13,7 +13,6 @@ class FormatConfigPage extends StatefulWidget {
 class _FormatConfigPageState extends State<FormatConfigPage> {
   final TextEditingController responseRegex = TextEditingController();
   final TextEditingController userName = TextEditingController();
-  final TextEditingController statusPrompt = TextEditingController();
   final TextEditingController inspirePrompt = TextEditingController();
   final TextEditingController welcomePrompt = TextEditingController();
   final TextEditingController drawPrompt = TextEditingController();
@@ -29,9 +28,6 @@ class _FormatConfigPageState extends State<FormatConfigPage> {
     });
     getUserName().then((value) {
       if (mounted) setState(() => userName.text = value);
-    });
-    getStatusPrompt().then((value) {
-      if (mounted) setState(() => statusPrompt.text = value);
     });
     getInspirePrompt().then((value) {
       if (mounted) setState(() => inspirePrompt.text = value);
@@ -57,7 +53,6 @@ class _FormatConfigPageState extends State<FormatConfigPage> {
   void dispose() {
     responseRegex.dispose();
     userName.dispose();
-    statusPrompt.dispose();
     inspirePrompt.dispose();
     welcomePrompt.dispose();
     drawPrompt.dispose();
@@ -118,7 +113,6 @@ class _FormatConfigPageState extends State<FormatConfigPage> {
             onPressed: () {
               setResponseRegex(responseRegex.text);
               setUserName(userName.text);
-              setStatusPrompt(statusPrompt.text);
               setInspirePrompt(inspirePrompt.text);
               setWelcomePrompt(welcomePrompt.text);
               setDrawPrompt(drawPrompt.text);
@@ -196,15 +190,6 @@ class _FormatConfigPageState extends State<FormatConfigPage> {
                 overflow: TextOverflow.ellipsis,
               ),
               onTap: () => _showEditDialog(context, I18n.t('draw_prompt'), drawPrompt, multiLine: true),
-            ),
-            ListTile(
-              title: Text(I18n.t('status_prompt')),
-              subtitle: Text(
-                statusPrompt.text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              onTap: () => _showEditDialog(context, I18n.t('status_prompt'), statusPrompt, multiLine: true),
             ),
             ListTile(
               title: Text(I18n.t('inspire_prompt')),
